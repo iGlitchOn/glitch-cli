@@ -2,7 +2,6 @@
 
 import os from 'node:os';
 import readline from 'node:readline';
-import type { Content, Part } from '@google/genai';
 import {
   formatAuthSummary,
   isAuthConfigured,
@@ -12,15 +11,19 @@ import {
 import {
   LOCAL_GOOGLE_MODELS,
   listVertexGoogleModels,
-  type ModelDefinition,
 } from './config/models.js';
 import { runAuthFlow } from './commands/auth.js';
-import { runModelCommand } from './commands/model.js';
-import { runEffortCommand } from './commands/effort.js';
-import { runSettingsCommand } from './commands/settings.js';
 import { toggleSubMode } from './permissions/permissions.js';
 import { formatStatusBar } from './ui/statusBar.js';
-import { createVertexGenAI, streamVertexChat } from './providers/vertex.js';
+import {
+  VertexProviderAdapter,
+  createVertexGenAI,
+} from './providers/vertex.js';
+import { CustomProviderAdapter } from './providers/custom.js';
+import type { ProviderAdapter } from './providers/types.js';
+import { SessionState } from './core/session.js';
+import { AgentLoop } from './core/agentLoop.js';
+import { handleUserInputLine } from './core/inputLoop.js';
 
 function createQuestionHelper(rl: readline.Interface) {
   return (promptText: string): Promise<string> =>
@@ -29,16 +32,26 @@ function createQuestionHelper(rl: readline.Interface) {
     });
 }
 
-function printHelp(): void {
-  console.log('Comandos disponibles:');
-  console.log('  /auth                     Configurar conexión (Vertex AI o API personalizada)');
-  console.log('  /settings                 Panel de preferencias (modo, sub-modo, effort, thoughts)');
-  console.log('  /model [id|num]           Seleccionar modelo disponible (bloqueado durante petición activa)');
-  console.log('  /effort [low|medium|high] Ver o cambiar el nivel de effort del modelo actual');
-  console.log('  /help                     Mostrar esta ayuda');
-  console.log('  /exit                     Salir de Glitch CLI');
-  console.log('Atajos de teclado:');
-  console.log('  Shift+Tab / Alt+P         Alternar Sub-modo (Plan <-> Agent)');
+function buildProviderAdapter(session: SessionState): ProviderAdapter {
+  if (session.settings.provider === 'custom' && session.settings.custom) {
+    return new CustomProviderAdapter(session.settings.custom);
+  }
+  if (session.settings.provider === 'vertex' && session.settings.vertex) {
+    const ai = createVertexGenAI(session.settings.vertex);
+    return new VertexProviderAdapter(ai);
+  }
+  throw new Error('Autenticación no configurada. Ejecuta /auth primero.');
+}
+
+async function refreshModelsIfNeeded(session: SessionState): Promise<void> {
+  if (session.settings.provider === 'vertex' && session.settings.vertex) {
+    try {
+      const ai = createVertexGenAI(session.settings.vertex);
+      session.availableModels = await listVertexGoogleModels(ai);
+    } catch {
+      session.availableModels = [...LOCAL_GOOGLE_MODELS];
+    }
+  }
 }
 
 export async function main(
@@ -54,13 +67,11 @@ export async function main(
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
+    prompt: 'glitch> ',
   });
   const ask = createQuestionHelper(rl);
 
-  let settings = loadSettings();
-  const history: Content[] = [];
-  let availableModels: ModelDefinition[] = [...LOCAL_GOOGLE_MODELS];
-  let isRequestActive = false;
+  const session = new SessionState(loadSettings());
 
   // Atajo de teclado en vivo: Shift+Tab (\x1b[Z) o Alt+P (\x1bp) alterna Sub-modo Plan <-> Agent
   if (process.stdin.isTTY) {
@@ -70,140 +81,84 @@ export async function main(
       const isAltP = key?.name === 'p' && key?.meta === true;
       const isRawBacktab = str === '\x1b[Z';
       if (isShiftTab || isAltP || isRawBacktab) {
-        const nextSubMode = toggleSubMode(settings.subMode);
-        settings = { ...settings, subMode: nextSubMode };
-        saveSettings(settings);
+        const nextSubMode = toggleSubMode(session.settings.subMode);
+        session.settings = { ...session.settings, subMode: nextSubMode };
+        saveSettings(session.settings);
         process.stdout.write(
-          `${os.EOL}⇄ Sub-modo cambiado a: ${nextSubMode === 'plan' ? 'Plan' : 'Agent'}${os.EOL}${formatStatusBar(settings)}${os.EOL}`,
+          `${os.EOL}⇄ Sub-modo cambiado a: ${nextSubMode === 'plan' ? 'Plan' : 'Agent'}${os.EOL}${formatStatusBar(session.settings)}${os.EOL}`,
         );
+        rl.prompt(true);
       }
     });
   }
 
-  if (!isAuthConfigured(settings)) {
+  if (!isAuthConfigured(session.settings)) {
     console.log('Primera ejecución detectada: configura tu conexión.');
-    settings = await runAuthFlow(settings, ask);
+    session.settings = await runAuthFlow(session.settings, ask);
   } else {
-    console.log(`Conectado: ${formatAuthSummary(settings)}`);
+    console.log(`Conectado: ${formatAuthSummary(session.settings)}`);
   }
 
-  if (settings.provider === 'vertex' && settings.vertex) {
-    try {
-      const ai = createVertexGenAI(settings.vertex);
-      availableModels = await listVertexGoogleModels(ai);
-    } catch {
-      availableModels = [...LOCAL_GOOGLE_MODELS];
-    }
-  }
+  await refreshModelsIfNeeded(session);
 
-  let running = true;
-  while (running) {
-    console.log(formatStatusBar(settings));
-    const input = (await ask('glitch> ')).trim();
-    if (!input) continue;
+  const showPromptWithStatus = () => {
+    console.log(formatStatusBar(session.settings));
+    rl.prompt();
+  };
 
-    if (input === '/exit') {
-      console.log('Cerrando Glitch CLI...');
-      running = false;
-      break;
-    }
+  const agentLoop = new AgentLoop(
+    session,
+    () => buildProviderAdapter(session),
+    (text) => process.stdout.write(text),
+    (msg) => console.error(`${os.EOL}${msg}`),
+  );
 
-    if (input === '/help') {
-      printHelp();
-      continue;
-    }
+  showPromptWithStatus();
 
-    if (input === '/auth') {
-      settings = await runAuthFlow(settings, ask);
-      if (settings.provider === 'vertex' && settings.vertex) {
-        try {
-          const ai = createVertexGenAI(settings.vertex);
-          availableModels = await listVertexGoogleModels(ai);
-        } catch {
-          availableModels = [...LOCAL_GOOGLE_MODELS];
+  await new Promise<void>((resolve) => {
+    rl.on('line', (line) => {
+      void (async () => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          showPromptWithStatus();
+          return;
         }
-      }
-      continue;
-    }
 
-    if (input === '/settings') {
-      settings = await runSettingsCommand(settings, ask);
-      continue;
-    }
+        if (!trimmed.startsWith('/') && !isAuthConfigured(session.settings)) {
+          console.log('⚠ Debes configurar la autenticación primero con /auth.');
+          showPromptWithStatus();
+          return;
+        }
 
-    if (input === '/model' || input.startsWith('/model ')) {
-      const args = input.slice('/model'.length).trim();
-      settings = await runModelCommand(
-        settings,
-        availableModels,
-        isRequestActive,
-        args,
-        ask,
-      );
-      continue;
-    }
-
-    if (input === '/effort' || input.startsWith('/effort ')) {
-      const args = input.slice('/effort'.length).trim();
-      settings = runEffortCommand(settings, args);
-      continue;
-    }
-
-    if (input.startsWith('/')) {
-      console.log(
-        `Comando desconocido: ${input}. Escribe /help para ver los comandos disponibles.`,
-      );
-      continue;
-    }
-
-    if (!isAuthConfigured(settings)) {
-      console.log('⚠ Debes configurar la autenticación primero con /auth.');
-      continue;
-    }
-
-    if (settings.provider === 'vertex' && settings.vertex) {
-      isRequestActive = true;
-      try {
-        const ai = createVertexGenAI(settings.vertex);
-        history.push({ role: 'user', parts: [{ text: input }] });
-        process.stdout.write(os.EOL);
-        const collectedParts: Part[] = [];
-        let fullReply = '';
-        for await (const chunk of streamVertexChat(
-          ai,
-          settings.model,
-          history,
-          {
-            effort: settings.effort,
-            includeThoughts: settings.thoughts,
-            onParts: (parts) => collectedParts.push(...parts),
+        const result = await handleUserInputLine(trimmed, {
+          session,
+          agentLoop,
+          ask,
+          onAuthUpdated: () => refreshModelsIfNeeded(session),
+          onExit: () => {
+            rl.close();
+            resolve();
           },
-        )) {
-          process.stdout.write(chunk);
-          fullReply += chunk;
-        }
-        process.stdout.write(os.EOL);
-        history.push({
-          role: 'model',
-          parts:
-            collectedParts.length > 0
-              ? collectedParts
-              : [{ text: fullReply }],
         });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`✗ Error en petición a Vertex AI: ${msg}`);
-      } finally {
-        isRequestActive = false;
-      }
-    } else {
-      console.log(
-        'ℹ El adaptador de API personalizada se activará en la Etapa 4.',
-      );
-    }
-  }
 
-  rl.close();
+        if (trimmed === '/exit') {
+          return;
+        }
+
+        if (result.handledAsSlash) {
+          showPromptWithStatus();
+        } else if (result.queuedTask) {
+          // Input loop NO espera a que termine el agent loop: permite slash commands en vivo
+          void result.queuedTask.then(() => {
+            process.stdout.write(os.EOL);
+            showPromptWithStatus();
+          });
+        }
+      })();
+    });
+
+    rl.on('close', () => resolve());
+  });
 }
 
 const isDirectExecution =
