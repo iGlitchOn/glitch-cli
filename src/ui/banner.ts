@@ -1,6 +1,12 @@
 import os from 'node:os';
 import path from 'node:path';
 
+export const IGLITCHOFF_WORDMARK = [
+  '▜█▘▗█▀▀▜▙ █▌   ▜█▘▀█▛▀▗█▀▀▜▙ █▌ █▌ ▗█▀▀▜▙ ▛▀▀▀ ▛▀▀▀',
+  '▐█ █▌  ▄▄ █▌   ▐█  █▌ █▌     █▙▄█▌ █▌  ▐█ █▀▀  █▀▀ ',
+  '▐█ ▜▙ ▝█▛ █▙▄▄ ▐█  █▌ ▜▙ ▗█▛ █▌ █▌ ▜▙▄▄█▛ █▌   █▌  ',
+].join(os.EOL);
+
 export const GLITCH_ASCII_LINES: readonly string[] = [
   '--------------------------------------------------------------------------------',
   '-------------------------------====-----=*#%%#+=--------------------------------',
@@ -62,12 +68,6 @@ export function formatShortCwd(cwd: string = process.cwd()): string {
   return normalizedCwd;
 }
 
-/**
- * Renderiza la pantalla inicial al estilo OpenAI Codex CLI:
- * - Cabecera superior izquierda: `>_ Glitch CLI (v0.1.0)` y directorio actual (`~`).
- * - Arte ASCII centrado en la ventana de terminal.
- * - Leyenda inferior de ayuda rápida (`? para atajos`).
- */
 export function formatStartupBanner(
   version = '0.1.0',
   terminalColumns = process.stdout.columns || 100,
