@@ -7,6 +7,7 @@ import {
   formatAuthSummary,
   isAuthConfigured,
   loadSettings,
+  saveSettings,
 } from './config/settings.js';
 import {
   LOCAL_GOOGLE_MODELS,
@@ -16,6 +17,8 @@ import {
 import { runAuthFlow } from './commands/auth.js';
 import { runModelCommand } from './commands/model.js';
 import { runEffortCommand } from './commands/effort.js';
+import { runSettingsCommand } from './commands/settings.js';
+import { toggleSubMode } from './permissions/permissions.js';
 import { formatStatusBar } from './ui/statusBar.js';
 import { createVertexGenAI, streamVertexChat } from './providers/vertex.js';
 
@@ -28,11 +31,14 @@ function createQuestionHelper(rl: readline.Interface) {
 
 function printHelp(): void {
   console.log('Comandos disponibles:');
-  console.log('  /auth                  Configurar conexión (Vertex AI o API personalizada)');
-  console.log('  /model [id|num]        Seleccionar modelo disponible (bloqueado durante petición activa)');
+  console.log('  /auth                     Configurar conexión (Vertex AI o API personalizada)');
+  console.log('  /settings                 Panel de preferencias (modo, sub-modo, effort, thoughts)');
+  console.log('  /model [id|num]           Seleccionar modelo disponible (bloqueado durante petición activa)');
   console.log('  /effort [low|medium|high] Ver o cambiar el nivel de effort del modelo actual');
-  console.log('  /help                  Mostrar esta ayuda');
-  console.log('  /exit                  Salir de Glitch CLI');
+  console.log('  /help                     Mostrar esta ayuda');
+  console.log('  /exit                     Salir de Glitch CLI');
+  console.log('Atajos de teclado:');
+  console.log('  Shift+Tab / Alt+P         Alternar Sub-modo (Plan <-> Agent)');
 }
 
 export async function main(
@@ -55,6 +61,24 @@ export async function main(
   const history: Content[] = [];
   let availableModels: ModelDefinition[] = [...LOCAL_GOOGLE_MODELS];
   let isRequestActive = false;
+
+  // Atajo de teclado en vivo: Shift+Tab (\x1b[Z) o Alt+P (\x1bp) alterna Sub-modo Plan <-> Agent
+  if (process.stdin.isTTY) {
+    readline.emitKeypressEvents(process.stdin, rl);
+    process.stdin.on('keypress', (str: string, key?: readline.Key) => {
+      const isShiftTab = key?.name === 'tab' && key?.shift === true;
+      const isAltP = key?.name === 'p' && key?.meta === true;
+      const isRawBacktab = str === '\x1b[Z';
+      if (isShiftTab || isAltP || isRawBacktab) {
+        const nextSubMode = toggleSubMode(settings.subMode);
+        settings = { ...settings, subMode: nextSubMode };
+        saveSettings(settings);
+        process.stdout.write(
+          `${os.EOL}⇄ Sub-modo cambiado a: ${nextSubMode === 'plan' ? 'Plan' : 'Agent'}${os.EOL}${formatStatusBar(settings)}${os.EOL}`,
+        );
+      }
+    });
+  }
 
   if (!isAuthConfigured(settings)) {
     console.log('Primera ejecución detectada: configura tu conexión.');
@@ -99,6 +123,11 @@ export async function main(
           availableModels = [...LOCAL_GOOGLE_MODELS];
         }
       }
+      continue;
+    }
+
+    if (input === '/settings') {
+      settings = await runSettingsCommand(settings, ask);
       continue;
     }
 
