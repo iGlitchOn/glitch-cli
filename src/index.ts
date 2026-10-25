@@ -2,13 +2,21 @@
 
 import os from 'node:os';
 import readline from 'node:readline';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import {
   formatAuthSummary,
   isAuthConfigured,
   loadSettings,
 } from './config/settings.js';
+import {
+  LOCAL_GOOGLE_MODELS,
+  listVertexGoogleModels,
+  type ModelDefinition,
+} from './config/models.js';
 import { runAuthFlow } from './commands/auth.js';
+import { runModelCommand } from './commands/model.js';
+import { runEffortCommand } from './commands/effort.js';
+import { formatStatusBar } from './ui/statusBar.js';
 import { createVertexGenAI, streamVertexChat } from './providers/vertex.js';
 
 function createQuestionHelper(rl: readline.Interface) {
@@ -20,9 +28,11 @@ function createQuestionHelper(rl: readline.Interface) {
 
 function printHelp(): void {
   console.log('Comandos disponibles:');
-  console.log('  /auth   Configurar conexión (Vertex AI o API personalizada)');
-  console.log('  /help   Mostrar esta ayuda');
-  console.log('  /exit   Salir de Glitch CLI');
+  console.log('  /auth                  Configurar conexión (Vertex AI o API personalizada)');
+  console.log('  /model [id|num]        Seleccionar modelo disponible (bloqueado durante petición activa)');
+  console.log('  /effort [low|medium|high] Ver o cambiar el nivel de effort del modelo actual');
+  console.log('  /help                  Mostrar esta ayuda');
+  console.log('  /exit                  Salir de Glitch CLI');
 }
 
 export async function main(
@@ -43,6 +53,8 @@ export async function main(
 
   let settings = loadSettings();
   const history: Content[] = [];
+  let availableModels: ModelDefinition[] = [...LOCAL_GOOGLE_MODELS];
+  let isRequestActive = false;
 
   if (!isAuthConfigured(settings)) {
     console.log('Primera ejecución detectada: configura tu conexión.');
@@ -51,8 +63,18 @@ export async function main(
     console.log(`Conectado: ${formatAuthSummary(settings)}`);
   }
 
+  if (settings.provider === 'vertex' && settings.vertex) {
+    try {
+      const ai = createVertexGenAI(settings.vertex);
+      availableModels = await listVertexGoogleModels(ai);
+    } catch {
+      availableModels = [...LOCAL_GOOGLE_MODELS];
+    }
+  }
+
   let running = true;
   while (running) {
+    console.log(formatStatusBar(settings));
     const input = (await ask('glitch> ')).trim();
     if (!input) continue;
 
@@ -69,6 +91,32 @@ export async function main(
 
     if (input === '/auth') {
       settings = await runAuthFlow(settings, ask);
+      if (settings.provider === 'vertex' && settings.vertex) {
+        try {
+          const ai = createVertexGenAI(settings.vertex);
+          availableModels = await listVertexGoogleModels(ai);
+        } catch {
+          availableModels = [...LOCAL_GOOGLE_MODELS];
+        }
+      }
+      continue;
+    }
+
+    if (input === '/model' || input.startsWith('/model ')) {
+      const args = input.slice('/model'.length).trim();
+      settings = await runModelCommand(
+        settings,
+        availableModels,
+        isRequestActive,
+        args,
+        ask,
+      );
+      continue;
+    }
+
+    if (input === '/effort' || input.startsWith('/effort ')) {
+      const args = input.slice('/effort'.length).trim();
+      settings = runEffortCommand(settings, args);
       continue;
     }
 
@@ -85,24 +133,39 @@ export async function main(
     }
 
     if (settings.provider === 'vertex' && settings.vertex) {
+      isRequestActive = true;
       try {
         const ai = createVertexGenAI(settings.vertex);
         history.push({ role: 'user', parts: [{ text: input }] });
         process.stdout.write(os.EOL);
+        const collectedParts: Part[] = [];
         let fullReply = '';
         for await (const chunk of streamVertexChat(
           ai,
           settings.model,
           history,
+          {
+            effort: settings.effort,
+            includeThoughts: settings.thoughts,
+            onParts: (parts) => collectedParts.push(...parts),
+          },
         )) {
           process.stdout.write(chunk);
           fullReply += chunk;
         }
         process.stdout.write(os.EOL);
-        history.push({ role: 'model', parts: [{ text: fullReply }] });
+        history.push({
+          role: 'model',
+          parts:
+            collectedParts.length > 0
+              ? collectedParts
+              : [{ text: fullReply }],
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`✗ Error en petición a Vertex AI: ${msg}`);
+      } finally {
+        isRequestActive = false;
       }
     } else {
       console.log(

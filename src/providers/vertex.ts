@@ -1,5 +1,11 @@
-import { GoogleGenAI, type Content } from '@google/genai';
-import type { VertexConfig } from '../config/settings.js';
+import {
+  GoogleGenAI,
+  type Content,
+  type GenerateContentConfig,
+  type Part,
+} from '@google/genai';
+import { buildVertexThinkingConfig } from '../config/models.js';
+import type { EffortLevel, VertexConfig } from '../config/settings.js';
 
 export function createVertexGenAI(config: VertexConfig): GoogleGenAI {
   if (!config.project?.trim()) {
@@ -19,19 +25,44 @@ export function createVertexGenAI(config: VertexConfig): GoogleGenAI {
   });
 }
 
+export interface VertexStreamOptions {
+  effort?: EffortLevel;
+  includeThoughts?: boolean;
+  abortSignal?: AbortSignal;
+  onParts?: (parts: Part[]) => void;
+}
+
 export async function* streamVertexChat(
   ai: GoogleGenAI,
   model: string,
   contents: Content[],
-  abortSignal?: AbortSignal,
+  options: VertexStreamOptions = {},
 ): AsyncGenerator<string, void, unknown> {
+  const thinkingConfig = buildVertexThinkingConfig(
+    model,
+    options.effort ?? 'medium',
+    options.includeThoughts ?? true,
+  );
+
+  const config: GenerateContentConfig = {};
+  if (thinkingConfig) {
+    config.thinkingConfig = thinkingConfig;
+  }
+  if (options.abortSignal) {
+    config.abortSignal = options.abortSignal;
+  }
+
   const responseStream = await ai.models.generateContentStream({
     model,
     contents,
-    config: abortSignal ? { abortSignal } : undefined,
+    config,
   });
 
   for await (const chunk of responseStream) {
+    const parts = chunk.candidates?.[0]?.content?.parts;
+    if (parts && parts.length > 0 && options.onParts) {
+      options.onParts(parts);
+    }
     if (chunk.text) {
       yield chunk.text;
     }
