@@ -15,6 +15,7 @@ import {
 import { runAuthFlow } from './commands/auth.js';
 import { toggleSubMode } from './permissions/permissions.js';
 import { formatStatusBar } from './ui/statusBar.js';
+import { formatStartupBanner } from './ui/banner.js';
 import {
   VertexProviderAdapter,
   createVertexGenAI,
@@ -23,7 +24,7 @@ import { CustomProviderAdapter } from './providers/custom.js';
 import type { ProviderAdapter } from './providers/types.js';
 import { SessionState } from './core/session.js';
 import { AgentLoop } from './core/agentLoop.js';
-import { handleUserInputLine } from './core/inputLoop.js';
+import { handleUserInputLine, printHelpMenu } from './core/inputLoop.js';
 
 function createQuestionHelper(rl: readline.Interface) {
   return (promptText: string): Promise<string> =>
@@ -62,12 +63,15 @@ export async function main(
     return;
   }
 
-  console.log('⚡ Glitch CLI v0.1.0');
+  if (process.stdout.isTTY) {
+    process.stdout.write('\x1b[2J\x1b[H');
+  }
+  console.log(formatStartupBanner('0.1.0'));
 
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: 'glitch> ',
+    prompt: '  \x1b[90m›\x1b[0m ',
   });
   const ask = createQuestionHelper(rl);
 
@@ -93,16 +97,16 @@ export async function main(
   }
 
   if (!isAuthConfigured(session.settings)) {
-    console.log('Primera ejecución detectada: configura tu conexión.');
+    console.log('  Primera ejecución detectada: configura tu conexión.');
     session.settings = await runAuthFlow(session.settings, ask);
   } else {
-    console.log(`Conectado: ${formatAuthSummary(session.settings)}`);
+    console.log(`  \x1b[90mConectado: ${formatAuthSummary(session.settings)}\x1b[0m`);
   }
 
   await refreshModelsIfNeeded(session);
 
   const showPromptWithStatus = () => {
-    console.log(formatStatusBar(session.settings));
+    console.log(`  \x1b[90m${formatStatusBar(session.settings)}\x1b[0m`);
     rl.prompt();
   };
 
@@ -120,6 +124,12 @@ export async function main(
       void (async () => {
         const trimmed = line.trim();
         if (!trimmed) {
+          showPromptWithStatus();
+          return;
+        }
+
+        if (trimmed === '?') {
+          printHelpMenu();
           showPromptWithStatus();
           return;
         }
