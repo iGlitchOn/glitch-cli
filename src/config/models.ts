@@ -46,12 +46,95 @@ export function formatOrderedEfforts(efforts: readonly EffortLevel[]): string {
     .join(' - ');
 }
 
+const UPPERCASE_TOKENS = new Set(['it', 'pt', 'tts', 'stt', 'hq', 'ai']);
+
+/**
+ * Convierte cualquier ID de modelo (ej. "gemini-3.5-flash-lite", "gemini-2.5-flash-preview-04-17",
+ * "gemini-1.5-pro-002", "gemma-3-27b-it") en un nombre físico limpio y legible,
+ * para que nunca aparezca el ID crudo con guiones en la columna NOMBRE DEL MODELO.
+ */
+export function formatHumanModelName(
+  rawId: string,
+  apiDisplayName?: string,
+): string {
+  const cleanId = normalizeModelId(rawId);
+
+  if (
+    apiDisplayName &&
+    apiDisplayName.trim().length > 0 &&
+    apiDisplayName.trim().toLowerCase() !== cleanId.toLowerCase() &&
+    !apiDisplayName.includes('/')
+  ) {
+    return apiDisplayName.trim();
+  }
+
+  const lower = cleanId.toLowerCase();
+  if (lower === 'gemini-2.5-flash-image') {
+    return 'Nano Banana (Gemini 2.5 Flash Image)';
+  }
+  if (lower === 'gemini-3-pro-image-preview') {
+    return 'Nano Banana Pro (Gemini 3 Pro Image)';
+  }
+
+  // Reemplaza "flash-lite" temporalmente para mantener el guion "Flash-Lite"
+  const normalized = cleanId.replace(/flash-lite/gi, 'FlashLiteToken');
+  const tokens = normalized.split('-').filter(Boolean);
+
+  const formattedTokens: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    const tokLower = tok.toLowerCase();
+
+    if (tok === 'FlashLiteToken') {
+      formattedTokens.push('Flash-Lite');
+      continue;
+    }
+
+    // Si son dos números de mes-día al final (ej. 04-17 o 03-25)
+    if (
+      i === tokens.length - 2 &&
+      /^\d{2}$/.test(tok) &&
+      /^\d{2}$/.test(tokens[i + 1] ?? '')
+    ) {
+      formattedTokens.push(`(${tok}-${tokens[i + 1]})`);
+      break;
+    }
+
+    // Sufijo de revisión de 3 dígitos (ej. 001, 002)
+    if (i === tokens.length - 1 && /^\d{3}$/.test(tok)) {
+      formattedTokens.push(tok);
+      continue;
+    }
+
+    // Tamaños de parámetros como 27b, 12b, 4b, 9b
+    if (/^\d+b$/i.test(tok)) {
+      formattedTokens.push(tok.toUpperCase());
+      continue;
+    }
+
+    if (UPPERCASE_TOKENS.has(tokLower)) {
+      formattedTokens.push(tok.toUpperCase());
+      continue;
+    }
+
+    // Versiones numéricas como 4, 3.1, 2.5, 1.5
+    if (/^\d+(\.\d+)?$/.test(tok)) {
+      formattedTokens.push(tok);
+      continue;
+    }
+
+    formattedTokens.push(tok.charAt(0).toUpperCase() + tok.slice(1).toLowerCase());
+  }
+
+  return formattedTokens.join(' ');
+}
+
 /**
  * Registro local de modelos oficiales de Google en Vertex AI,
  * separados estrictamente por categoría y con fecha de lanzamiento (YYYY-MM-DD).
  */
 export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
-  // Página 1: Gemini (Chat, Código y Razonamiento)
+  // Página 1: Gemini
   {
     id: 'gemini-4-argon',
     name: 'Gemini 4 Argon',
@@ -248,11 +331,11 @@ export function groupModelsByFamilyPages(
   models: readonly ModelDefinition[],
 ): ModelFamilyPage[] {
   const familyMeta: Array<{ family: ModelFamily; title: string }> = [
-    { family: 'gemini', title: 'Gemini (Chat & Argon)' },
+    { family: 'gemini', title: 'Gemini' },
     { family: 'gemma', title: 'Gemma' },
     { family: 'nano-banana', title: 'Nano Banana & Imagen' },
     { family: 'embeddings', title: 'Embeddings' },
-    { family: 'media-live', title: 'Audio, Live & Video' },
+    { family: 'media-live', title: 'Audio, Transcribe & Live' },
     { family: 'custom', title: 'Custom' },
   ];
 
@@ -286,7 +369,9 @@ export function formatModelRowColumns(
   formatted: string;
 } {
   const activeSuffix = isActive ? ' (active)' : '';
-  const rawName = `${model.name}${activeSuffix}`;
+  const humanName =
+    model.name === model.id ? formatHumanModelName(model.id) : model.name;
+  const rawName = `${humanName}${activeSuffix}`;
   const nameCol = rawName.padEnd(nameColWidth, ' ');
   const idCol = model.id.padEnd(idColWidth, ' ');
   const dateCol = model.releaseDate.padEnd(dateColWidth, ' ');
@@ -338,9 +423,12 @@ function inferModelFamily(cleanId: string): ModelFamily {
     return 'nano-banana';
   }
   if (
+    lower.includes('transcribe') ||
     lower.includes('-live') ||
     lower.includes('-tts') ||
+    lower.includes('-stt') ||
     lower.includes('-audio') ||
+    lower.includes('speech') ||
     lower.startsWith('veo-')
   ) {
     return 'media-live';
@@ -353,12 +441,17 @@ function inferModelFamily(cleanId: string): ModelFamily {
 
 function inferReleaseDate(cleanId: string): string {
   const lower = cleanId.toLowerCase();
-  // Si trae fecha mm-dd o yyyy en el ID, o por generación de modelo
   if (lower.includes('gemini-4')) return '2026-04-15';
+  if (lower.includes('gemini-3.8')) return '2026-04-05';
+  if (lower.includes('gemini-3.7')) return '2026-03-28';
+  if (lower.includes('gemini-3.6')) return '2026-03-20';
+  if (lower.includes('gemini-3.5')) return '2026-03-15';
   if (lower.includes('gemini-3.1')) return '2026-03-01';
   if (lower.includes('gemini-3') || lower.includes('embedding-2')) {
     return '2026-01-15';
   }
+  if (lower.includes('gemini-2.5-flash-preview-04-17')) return '2025-04-17';
+  if (lower.includes('gemini-2.5-pro-exp-03-25')) return '2025-03-25';
   if (lower.includes('gemini-2.5')) return '2025-06-17';
   if (lower.includes('gemma-3')) return '2025-03-12';
   if (lower.includes('gemini-2.0') || lower.includes('imagen-3')) {
@@ -370,6 +463,7 @@ function inferReleaseDate(cleanId: string): string {
 export function getModelDefinition(
   modelId: string,
   provider: ProviderType = 'vertex',
+  apiDisplayName?: string,
 ): ModelDefinition {
   const cleanId = normalizeModelId(modelId);
   const found = LOCAL_GOOGLE_MODELS.find((m) => m.id === cleanId);
@@ -377,10 +471,12 @@ export function getModelDefinition(
     return found;
   }
 
+  const humanName = formatHumanModelName(cleanId, apiDisplayName);
+
   if (provider === 'custom') {
     return {
       id: cleanId,
-      name: cleanId,
+      name: humanName,
       family: 'custom',
       releaseDate: '2026-01-01',
       supportedEfforts: ['low', 'medium', 'high'],
@@ -395,7 +491,7 @@ export function getModelDefinition(
   if (family !== 'gemini') {
     return {
       id: cleanId,
-      name: cleanId,
+      name: humanName,
       family,
       releaseDate,
       supportedEfforts: [],
@@ -406,7 +502,7 @@ export function getModelDefinition(
   if (cleanId.startsWith('gemini-4-argon-cyber-permissive')) {
     return {
       id: cleanId,
-      name: cleanId,
+      name: humanName,
       family: 'gemini',
       releaseDate,
       supportedEfforts: ['high'],
@@ -419,7 +515,7 @@ export function getModelDefinition(
   if (cleanId.startsWith('gemini-4-argon') || cleanId.startsWith('gemini-3')) {
     return {
       id: cleanId,
-      name: cleanId,
+      name: humanName,
       family: 'gemini',
       releaseDate,
       supportedEfforts: ['low', 'medium', 'high'],
@@ -431,7 +527,7 @@ export function getModelDefinition(
 
   return {
     id: cleanId,
-    name: cleanId,
+    name: humanName,
     family: 'gemini',
     releaseDate,
     supportedEfforts: [],
@@ -448,16 +544,21 @@ export async function listVertexGoogleModels(
 
   try {
     const pager = await ai.models.list();
-    const discoveredIds = new Set<string>();
+    const discovered = new Map<string, string | undefined>();
 
     for await (const item of pager) {
       const candidateName = item.name ?? '';
       if (candidateName && isGoogleFreeTrialModelId(candidateName)) {
-        discoveredIds.add(normalizeModelId(candidateName));
+        const cleanId = normalizeModelId(candidateName);
+        const displayName =
+          typeof (item as Record<string, unknown>)['displayName'] === 'string'
+            ? ((item as Record<string, unknown>)['displayName'] as string)
+            : undefined;
+        discovered.set(cleanId, displayName);
       }
     }
 
-    if (discoveredIds.size === 0) {
+    if (discovered.size === 0) {
       return sortModelsByDateDesc(LOCAL_GOOGLE_MODELS);
     }
 
@@ -465,9 +566,9 @@ export async function listVertexGoogleModels(
     for (const preset of LOCAL_GOOGLE_MODELS) {
       merged.set(preset.id, preset);
     }
-    for (const id of discoveredIds) {
+    for (const [id, displayName] of discovered.entries()) {
       if (!merged.has(id)) {
-        merged.set(id, getModelDefinition(id, 'vertex'));
+        merged.set(id, getModelDefinition(id, 'vertex', displayName));
       }
     }
     return sortModelsByDateDesc(Array.from(merged.values()));

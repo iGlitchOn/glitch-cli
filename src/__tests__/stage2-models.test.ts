@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   LOCAL_GOOGLE_MODELS,
   buildVertexThinkingConfig,
+  formatHumanModelName,
   formatModelRowColumns,
+  getModelDefinition,
   groupModelsByFamilyPages,
   isGoogleFreeTrialModelId,
   listVertexGoogleModels,
@@ -189,13 +191,36 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
 
     // En la página 1 (Gemini), el más reciente (2026-04-15 Argon) está arriba y el más antiguo (2025-02-05) abajo, sin embeddings ni imagen mezclados
     const geminiPage = pages[0]!;
+    expect(geminiPage.title).toBe('Gemini');
     expect(geminiPage.models[0]?.releaseDate).toBe('2026-04-15');
     expect(geminiPage.models.at(-1)?.releaseDate).toBe('2025-02-05');
     expect(
       geminiPage.models.some(
-        (m) => m.id.includes('embedding') || m.id.includes('image'),
+        (m) =>
+          m.id.includes('embedding') ||
+          m.id.includes('image') ||
+          m.id.includes('transcribe'),
       ),
     ).toBe(false);
+
+    // Verifica que modelos dinámicos nunca tengan el ID crudo como nombre y que transcribe se separe
+    expect(formatHumanModelName('gemini-3.5-flash-lite')).toBe(
+      'Gemini 3.5 Flash-Lite',
+    );
+    expect(formatHumanModelName('gemini-2.5-flash-preview-04-17')).toBe(
+      'Gemini 2.5 Flash Preview (04-17)',
+    );
+    expect(formatHumanModelName('gemini-1.5-pro-002')).toBe(
+      'Gemini 1.5 Pro 002',
+    );
+    expect(formatHumanModelName('gemini-omni-1.1-flash-preview')).toBe(
+      'Gemini Omni 1.1 Flash Preview',
+    );
+
+    const transcribeDef = getModelDefinition('gemini-3.5-transcribe', 'vertex');
+    expect(transcribeDef.family).toBe('media-live');
+    expect(transcribeDef.name).toBe('Gemini 3.5 Transcribe');
+    expect(transcribeDef.supportedEfforts).toEqual([]);
 
     const argonModel = LOCAL_GOOGLE_MODELS.find(
       (m) => m.id === 'gemini-4-argon',
