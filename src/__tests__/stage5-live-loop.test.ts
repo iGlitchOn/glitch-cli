@@ -4,9 +4,17 @@ import path from 'node:path';
 import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '../config/settings.js';
+import {
+  matchSlashCommands,
+  resolveSlashCommandAlias,
+} from '../commands/slashRegistry.js';
 import { AgentLoop } from '../core/agentLoop.js';
 import { handleUserInputLine } from '../core/inputLoop.js';
 import { SessionState } from '../core/session.js';
+import {
+  listSavedSessions,
+  saveSessionToDisk,
+} from '../core/sessionStore.js';
 import type {
   ProviderAdapter,
   ProviderRequestOptions,
@@ -209,5 +217,66 @@ describe('Etapa 5: Slash commands en vivo con AgentLoop separado del InputLoop',
       'Prompt en cola 2 (EDITADO)',
       'Prompt en cola 3',
     ]);
+  });
+
+  it('mapea alternativas (/cl, /clear -> /new y /continue -> /resume) y ejecuta /new y /resume correctamente', async () => {
+    // Al buscar /cl o /clear aparece el comando original /new
+    const matchesCl = matchSlashCommands('/cl');
+    expect(matchesCl[0]?.cmd).toBe('/new');
+    const matchesClear = matchSlashCommands('/clear');
+    expect(matchesClear[0]?.cmd).toBe('/new');
+    expect(resolveSlashCommandAlias('/clear')).toBe('/new');
+    expect(resolveSlashCommandAlias('/continue 1')).toBe('/resume 1');
+
+    const session = new SessionState({ ...DEFAULT_SETTINGS });
+    const fakeAdapter: ProviderAdapter = {
+      id: 'vertex',
+      async *streamTurn(): AsyncGenerator<ProviderStreamChunk, void, unknown> {
+        yield { text: 'ok' };
+      },
+    };
+    const agentLoop = new AgentLoop(session, () => fakeAdapter, () => {});
+    const logs: string[] = [];
+
+    // Guarda una sesión previa en disco para probar /resume
+    saveSessionToDisk(
+      {
+        id: 'ses-test-1',
+        title: 'Sesión guardada de prueba',
+        createdAt: '2026-10-25 10:00:00',
+        updatedAt: '2026-10-25 10:05:00',
+        model: 'gemini-4-argon',
+        effort: 'high',
+        history: [
+          { role: 'user', parts: [{ text: 'Hola mundo' }] },
+          { role: 'model', parts: [{ text: 'Hola!' }] },
+        ],
+        messages: [],
+      },
+      tempHome,
+    );
+
+    expect(listSavedSessions(tempHome)).toHaveLength(1);
+
+    // Retoma la sesión 1 usando /resume 1
+    await handleUserInputLine('/resume 1', {
+      session,
+      agentLoop,
+      ask: async () => '',
+      out: (m) => logs.push(m),
+      customHomeDir: tempHome,
+    });
+    expect(session.history).toHaveLength(2);
+
+    // Limpia la conversación usando el alias /clear (que resuelve a /new)
+    await handleUserInputLine('/clear', {
+      session,
+      agentLoop,
+      ask: async () => '',
+      out: (m) => logs.push(m),
+      customHomeDir: tempHome,
+    });
+    expect(session.history).toHaveLength(0);
+    expect(logs.at(-1)).toContain('/new');
   });
 });

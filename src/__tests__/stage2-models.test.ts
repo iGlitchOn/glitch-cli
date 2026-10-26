@@ -162,6 +162,18 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     );
     expect(switched.model).toBe('gemini-4-argon-cyber-permissive');
     expect(switched.effort).toBe('high');
+
+    const withEffortArg = await runModelCommand(
+      { ...baseSettings, model: 'gemini-2.5-pro', effort: 'low' },
+      LOCAL_GOOGLE_MODELS,
+      false,
+      'gemini-4-argon high',
+      async () => '',
+      (m) => logs.push(m),
+      tempHome,
+    );
+    expect(withEffortArg.model).toBe('gemini-4-argon');
+    expect(withEffortArg.effort).toBe('high');
   });
 
   it('renderiza la barra de estado sin corchetes y con el nombre físico del modelo, Esfuerzo, Modo y Sub-Modo', () => {

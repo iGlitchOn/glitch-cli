@@ -20,8 +20,15 @@ import {
   getModelDefinition,
   groupModelsByFamilyPages,
   listVertexGoogleModels,
+  type ModelDefinition,
 } from '../config/models.js';
 import { runEffortCommand } from '../commands/effort.js';
+import { parseModelAndEffortArgs } from '../commands/model.js';
+import {
+  SLASH_COMMANDS,
+  matchSlashCommands,
+  resolveSlashCommandAlias,
+} from '../commands/slashRegistry.js';
 import { toggleSubMode } from '../permissions/permissions.js';
 import {
   GLITCH_ASCII_LINES,
@@ -31,58 +38,56 @@ import {
 import { formatStatusBar } from './statusBar.js';
 import { SessionState } from '../core/session.js';
 import {
+  createSessionId,
+  deriveSessionTitle,
+  listSavedSessions,
+  saveSessionToDisk,
+  type SavedSession,
+  type SavedUiMessage,
+} from '../core/sessionStore.js';
+import {
   VertexProviderAdapter,
   createVertexGenAI,
 } from '../providers/vertex.js';
 import { CustomProviderAdapter } from '../providers/custom.js';
 import type { ProviderAdapter } from '../providers/types.js';
 
-interface UiMessage {
-  id: string;
-  role: 'user' | 'model' | 'system';
-  text: string;
-  thoughtText?: string;
-}
-
-type ActiveDialog = 'none' | 'auth' | 'model' | 'settings';
-
-const SLASH_COMMANDS = [
-  { cmd: '/auth', desc: 'Configurar conexión (Vertex AI o API personalizada)' },
-  { cmd: '/model', desc: 'Seleccionar modelo por páginas (←/→ familia, ↑/↓ modelo)' },
-  { cmd: '/effort', desc: 'Ver o cambiar nivel de esfuerzo en vivo (low | medium | high)' },
-  { cmd: '/settings', desc: 'Preferencias (Modo, Sub-Modo Plan/Agent, Esfuerzo, Thoughts, Aviso --DAA)' },
-  { cmd: '/help', desc: 'Mostrar comandos, flags (-m, --model, --DAA) y atajos' },
-  { cmd: '/exit', desc: 'Salir de Glitch CLI' },
-];
+type ActiveDialog = 'none' | 'auth' | 'model' | 'settings' | 'resume';
 
 export interface TuiAppProps {
   initialSettings: GlitchSettings;
   version?: string;
+  launchedWithDaaFlag?: boolean;
 }
 
 export const TuiApp: React.FC<TuiAppProps> = ({
   initialSettings,
   version = '0.1.0',
+  launchedWithDaaFlag = false,
 }) => {
   const { exit } = useApp();
   useStdout();
   const columns = process.stdout.columns ?? 100;
 
   const sessionRef = useRef<SessionState>(new SessionState(initialSettings));
+  const [sessionId, setSessionId] = useState<string>(() => createSessionId());
+  const sessionCreatedAtRef = useRef<string>(new Date().toISOString());
+
   const [settings, setSettings] = useState<GlitchSettings>(initialSettings);
   const [availableModels, setAvailableModels] = useState(
     sessionRef.current.availableModels,
   );
 
-  // Pantalla de peligro --DAA de 3 segundos al iniciar (si permissionMode es always_allow y no está oculta en /settings)
+  // El aviso TUI de 3 segundos SOLO se muestra si se pasó la flag explícita (--DAA / --dangerously-always-allow)
+  // y no está desactivado en /settings. Si Always Allow ya estaba guardado de antes sin la flag, no molesta.
   const shouldShowDaaSplash =
-    initialSettings.permissionMode === 'always_allow' &&
-    !initialSettings.hideDaaWarning;
+    launchedWithDaaFlag && !initialSettings.hideDaaWarning;
   const [daaSplashSeconds, setDaaSplashSeconds] = useState<number>(
     shouldShowDaaSplash ? 3 : 0,
   );
 
-  const [messages, setMessages] = useState<UiMessage[]>([]);
+  const [messages, setMessages] = useState<SavedUiMessage[]>([]);
+  const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [inputText, setInputText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [liveThought, setLiveThought] = useState('');
@@ -117,15 +122,39 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   );
   const [tempKey, setTempKey] = useState('');
 
-  // Estado del diálogo /model y /settings
+  // Estado de diálogos /model (incluyendo sub-paso de esfuerzo), /settings y /resume
   const [dialogCursor, setDialogCursor] = useState(0);
   const [modelPageIdx, setModelPageIdx] = useState(0);
+  const [pendingModelForEffort, setPendingModelForEffort] =
+    useState<ModelDefinition | null>(null);
+  const [modelEffortIdx, setModelEffortIdx] = useState(0);
+  const [savedSessionsList, setSavedSessionsList] = useState<SavedSession[]>([]);
+
   const modelPages = groupModelsByFamilyPages(availableModels);
 
   const syncSettings = (next: GlitchSettings) => {
     sessionRef.current.settings = next;
     setSettings({ ...next });
     saveSettings(next);
+  };
+
+  const persistCurrentSession = (
+    nextMessages: SavedUiMessage[],
+    currentId = sessionId,
+  ) => {
+    const history = sessionRef.current.history;
+    if (history.length === 0) return;
+    const curSettings = sessionRef.current.settings;
+    saveSessionToDisk({
+      id: currentId,
+      title: deriveSessionTitle(nextMessages, history),
+      createdAt: sessionCreatedAtRef.current,
+      updatedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      model: curSettings.model,
+      effort: curSettings.effort,
+      history: [...history],
+      messages: nextMessages.filter((m) => m.role !== 'system'),
+    });
   };
 
   const addSystemMessage = (text: string) => {
@@ -153,14 +182,14 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
   };
 
-  // Temporizador de 3 segundos para la pantalla de advertencia --DAA
+  // Temporizador de 3 segundos para la pantalla de advertencia --DAA (solo cuando se pasó la flag explícita)
   useEffect(() => {
     if (daaSplashSeconds <= 0) return;
     const timer = setTimeout(() => {
       if (daaSplashSeconds === 1) {
         setDaaSplashSeconds(0);
         addSystemMessage(
-          '⚠ Modo --DAA (Always Allow sin sandbox) activo. Si quieres desactivar este mensaje de advertencia al iniciar, configúralo en /settings (Advertencia --DAA al inicio: OFF).',
+          '⚠ Flag --DAA activa: si quieres desactivar este mensaje inicial de 3 segundos, configúralo en /settings (Advertencia --DAA al inicio: OFF).',
         );
       } else {
         setDaaSplashSeconds((prev) => prev - 1);
@@ -175,14 +204,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
   }, []);
 
+  // Busca tanto por el nombre del comando como por sus alternativas (ej. /clear o /cl -> muestra /new)
   const matchingSlash =
-    activeDialog === 'none' &&
-    inputText.startsWith('/') &&
-    !inputText.includes(' ')
-      ? SLASH_COMMANDS.filter((s) =>
-          s.cmd.startsWith(inputText.toLowerCase()),
-        )
-      : [];
+    activeDialog === 'none' ? matchSlashCommands(inputText) : [];
 
   const buildAdapter = (): ProviderAdapter => {
     const cur = sessionRef.current.settings;
@@ -203,10 +227,12 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     setLiveThought('');
     setLiveText('');
 
-    setMessages((prev) => [
-      ...prev,
-      { id: `${Date.now()}-${Math.random()}-u`, role: 'user', text: userPrompt },
-    ]);
+    const userMsg: SavedUiMessage = {
+      id: `${Date.now()}-${Math.random()}-u`,
+      role: 'user',
+      text: userPrompt,
+    };
+    setMessages((prev) => [...prev, userMsg]);
     session.history.push({ role: 'user', parts: [{ text: userPrompt }] });
 
     try {
@@ -243,15 +269,17 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             : [{ text: accText }],
       });
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `${Date.now()}-${Math.random()}-m`,
-          role: 'model',
-          text: accText || '(sin respuesta de texto)',
-          thoughtText: accThought || undefined,
-        },
-      ]);
+      const modelMsg: SavedUiMessage = {
+        id: `${Date.now()}-${Math.random()}-m`,
+        role: 'model',
+        text: accText || '(sin respuesta de texto)',
+        thoughtText: accThought || undefined,
+      };
+      setMessages((prev) => {
+        const next = [...prev, modelMsg];
+        persistCurrentSession(next);
+        return next;
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       addSystemMessage(`✗ Error: ${msg}`);
@@ -261,7 +289,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const startOrEnqueuePrompt = (userPrompt: string) => {
     const session = sessionRef.current;
 
-    // Si ya hay una petición activa, el mensaje entra a la fila (Queue) en orden FIFO
     if (session.isRequestActive) {
       queueRef.current.push(userPrompt);
       syncQueueState();
@@ -290,29 +317,37 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     const trimmed = raw.trim();
     if (!trimmed) return;
 
-    if (trimmed === '/exit') {
+    const resolved = trimmed.startsWith('/')
+      ? resolveSlashCommandAlias(trimmed)
+      : trimmed;
+
+    if (resolved === '/exit') {
       exit();
       return;
     }
 
-    if (trimmed === '/help' || trimmed === '?') {
+    if (resolved === '/help' || resolved === '?') {
+      setShowShortcutsPanel((prev) => !prev);
       addSystemMessage(
         [
           'Comandos dentro de Glitch CLI:',
-          '  /auth                     Selector de conexión (Vertex AI ADC / API personalizada)',
-          '  /model [id]               Selector de modelos por páginas (←/→ familia, ↑/↓ modelo)',
+          '  /new                      Iniciar conversación limpia (alternativas: /clear, /cls, /reset)',
+          '  /resume [num|id]          Retomar conversación guardada (alternativas: /continue, /history)',
+          '  /model [id] [effort]      Seleccionar modelo y esfuerzo (ej. /model gemini-4-argon high)',
           '  /effort [low|medium|high] Cambiar o consultar el nivel de esfuerzo en vivo',
           '  /settings                 Panel interactivo (Modo, Sub-Modo, Esfuerzo, Thoughts, Aviso --DAA)',
+          '  /auth                     Selector de conexión (Vertex AI ADC / API personalizada)',
           '  /help                     Mostrar esta ayuda',
           '  /exit                     Salir de Glitch CLI',
           '',
           'Ramas de ejecución al iniciar en terminal:',
-          '  glitch --DAA                        Iniciar en modo Always Allow sin sandbox (acceso total al PC)',
+          '  glitch --DAA                        Iniciar forzando Always Allow sin sandbox (con aviso TUI de 3s)',
           '  glitch --dangerously-always-allow   Equivalente a --DAA',
           '  glitch --model gemini-2.5-flash     Iniciar directamente con un modelo específico',
           '  glitch -m "gemini-2.5-flash"        Forma corta para elegir modelo al iniciar',
           '',
           'Atajos y Fila de Espera (Queue):',
+          '  ? (con barra vacía)       Mostrar/ocultar panel de atajos al instante',
           '  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agent en vivo',
           '  ↑ / ↓ con cola activa     Subir/bajar entre los prompts en fila (Queue) y Enter para reemplazar en su misma posición',
         ].join(os.EOL),
@@ -320,7 +355,57 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    if (trimmed === '/auth') {
+    if (resolved === '/new') {
+      persistCurrentSession(messages);
+      sessionRef.current.history.length = 0;
+      const nextId = createSessionId();
+      sessionCreatedAtRef.current = new Date().toISOString();
+      setSessionId(nextId);
+      setMessages([]);
+      setShowShortcutsPanel(false);
+      return;
+    }
+
+    if (resolved === '/resume' || resolved.startsWith('/resume ')) {
+      const arg = resolved.slice('/resume'.length).trim();
+      const list = listSavedSessions();
+      if (list.length === 0) {
+        addSystemMessage(
+          'ℹ No hay conversaciones guardadas todavía para retomar con /resume.',
+        );
+        return;
+      }
+      if (arg) {
+        const byIdx = Number.parseInt(arg, 10);
+        const found =
+          !Number.isNaN(byIdx) && byIdx >= 1 && byIdx <= list.length
+            ? list[byIdx - 1]
+            : list.find((s) => s.id === arg);
+        if (!found) {
+          addSystemMessage(`✗ No se encontró la conversación "${arg}".`);
+          return;
+        }
+        sessionRef.current.history.length = 0;
+        sessionRef.current.history.push(...found.history);
+        setSessionId(found.id);
+        sessionCreatedAtRef.current = found.createdAt;
+        setMessages([
+          ...found.messages,
+          {
+            id: `${Date.now()}-resumed`,
+            role: 'system',
+            text: `✓ Conversación retomada: "${found.title}" (${found.history.length} turnos).`,
+          },
+        ]);
+        return;
+      }
+      setSavedSessionsList(list);
+      setDialogCursor(0);
+      setActiveDialog('resume');
+      return;
+    }
+
+    if (resolved === '/auth') {
       setAuthStep('provider');
       setAuthChoiceIdx(0);
       setAuthBuffer('');
@@ -328,41 +413,64 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    if (trimmed === '/settings') {
+    if (resolved === '/settings') {
       setDialogCursor(0);
       setActiveDialog('settings');
       return;
     }
 
-    if (trimmed === '/model' || trimmed.startsWith('/model ')) {
+    if (resolved === '/model' || resolved.startsWith('/model ')) {
       if (sessionRef.current.isRequestActive) {
         addSystemMessage(
           '⚠ No puedes cambiar de modelo mientras hay una petición activa. Espera a que termine la tarea actual.',
         );
         return;
       }
-      const arg = trimmed.slice('/model'.length).trim();
-      if (arg) {
-        const exists = availableModels.find((m) => m.id === arg);
+      const rawArgs = resolved.slice('/model'.length).trim();
+      if (rawArgs) {
+        const { modelArg, effortArg } = parseModelAndEffortArgs(rawArgs);
+        const exists = availableModels.find((m) => m.id === modelArg);
         if (!exists && (settings.provider ?? 'vertex') === 'vertex') {
-          addSystemMessage(`✗ Modelo "${arg}" no disponible en Vertex AI.`);
+          addSystemMessage(`✗ Modelo "${modelArg}" no disponible en Vertex AI.`);
           return;
         }
-        const def = getModelDefinition(arg, settings.provider ?? 'vertex');
-        const nextEffort =
+        const def = getModelDefinition(modelArg, settings.provider ?? 'vertex');
+        let nextEffort = settings.effort;
+
+        if (effortArg) {
+          if (def.supportedEfforts.length === 0) {
+            addSystemMessage(
+              `⚠ ${def.name} no usa niveles de esfuerzo (ESFUERZO: N/A). Se activó el modelo sin effort.`,
+            );
+          } else if (
+            !def.supportedEfforts.includes(effortArg as EffortLevel)
+          ) {
+            addSystemMessage(
+              `✗ El esfuerzo "${effortArg}" no es válido para ${def.name}. Permitidos: ${def.supportedEfforts.map((e) => e.toUpperCase()).join(' - ')}.`,
+            );
+            return;
+          } else {
+            nextEffort = effortArg as EffortLevel;
+          }
+        } else if (
           def.supportedEfforts.length > 0 &&
-          !def.supportedEfforts.includes(settings.effort)
-            ? (def.defaultEffort ?? def.supportedEfforts[0]!)
-            : settings.effort;
+          !def.supportedEfforts.includes(nextEffort)
+        ) {
+          nextEffort = def.defaultEffort ?? def.supportedEfforts[0]!;
+        }
+
         const updated: GlitchSettings = {
           ...settings,
           model: def.id,
           effort: nextEffort,
         };
         syncSettings(updated);
-        addSystemMessage(`✓ Modelo cambiado a ${def.name} (${updated.model}).`);
+        addSystemMessage(
+          `✓ Modelo cambiado a ${def.name} (${updated.model})${def.supportedEfforts.length > 0 ? ` con Esfuerzo: ${updated.effort.toUpperCase()}` : ''}.`,
+        );
         return;
       }
+
       const foundPageIdx = Math.max(
         0,
         modelPages.findIndex((p) =>
@@ -374,14 +482,15 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         0,
         pageModels.findIndex((m) => m.id === settings.model),
       );
+      setPendingModelForEffort(null);
       setModelPageIdx(foundPageIdx);
       setDialogCursor(currentIdx);
       setActiveDialog('model');
       return;
     }
 
-    if (trimmed === '/effort' || trimmed.startsWith('/effort ')) {
-      const arg = trimmed.slice('/effort'.length).trim();
+    if (resolved === '/effort' || resolved.startsWith('/effort ')) {
+      const arg = resolved.slice('/effort'.length).trim();
       const logs: string[] = [];
       const updated = runEffortCommand(
         sessionRef.current.settings,
@@ -395,7 +504,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    if (trimmed.startsWith('/')) {
+    if (resolved.startsWith('/')) {
       addSystemMessage(
         `✗ Comando desconocido: ${trimmed}. Usa /help para ver los comandos disponibles.`,
       );
@@ -429,6 +538,58 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       addSystemMessage(
         `⇄ Sub-Modo cambiado en vivo a: ${nextSubMode === 'plan' ? 'Plan (solo planear)' : 'Agent (modificación activa)'}`,
       );
+      return;
+    }
+
+    // Atajo '?' instantáneo cuando la barra de entrada está vacía y no hay diálogo abierto
+    if (
+      activeDialog === 'none' &&
+      inputText.length === 0 &&
+      input === '?' &&
+      !key.ctrl &&
+      !key.meta
+    ) {
+      setShowShortcutsPanel((prev) => !prev);
+      return;
+    }
+
+    // Manejo del diálogo /resume
+    if (activeDialog === 'resume') {
+      if (key.escape) {
+        setActiveDialog('none');
+        return;
+      }
+      if (key.upArrow && savedSessionsList.length > 0) {
+        setDialogCursor((prev) =>
+          prev > 0 ? prev - 1 : savedSessionsList.length - 1,
+        );
+        return;
+      }
+      if (key.downArrow && savedSessionsList.length > 0) {
+        setDialogCursor((prev) =>
+          prev < savedSessionsList.length - 1 ? prev + 1 : 0,
+        );
+        return;
+      }
+      if (key.return) {
+        const picked = savedSessionsList[dialogCursor];
+        if (picked) {
+          sessionRef.current.history.length = 0;
+          sessionRef.current.history.push(...picked.history);
+          setSessionId(picked.id);
+          sessionCreatedAtRef.current = picked.createdAt;
+          setMessages([
+            ...picked.messages,
+            {
+              id: `${Date.now()}-resumed`,
+              role: 'system',
+              text: `✓ Conversación retomada: "${picked.title}" (${picked.history.length} turnos).`,
+            },
+          ]);
+        }
+        setActiveDialog('none');
+        return;
+      }
       return;
     }
 
@@ -548,8 +709,48 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    // Manejo del diálogo /model (con paginación por familia ← / →)
+    // Manejo del diálogo /model (con paginación ← / → y selección de esfuerzo integrada)
     if (activeDialog === 'model') {
+      // Sub-paso: elegir Esfuerzo para el modelo seleccionado
+      if (pendingModelForEffort) {
+        const efforts = pendingModelForEffort.supportedEfforts;
+        if (key.escape) {
+          setPendingModelForEffort(null);
+          return;
+        }
+        if (key.leftArrow || key.upArrow) {
+          setModelEffortIdx((prev) =>
+            prev > 0 ? prev - 1 : efforts.length - 1,
+          );
+          return;
+        }
+        if (key.rightArrow || key.downArrow) {
+          setModelEffortIdx((prev) =>
+            prev < efforts.length - 1 ? prev + 1 : 0,
+          );
+          return;
+        }
+        if (key.return) {
+          const chosenEffort =
+            efforts[modelEffortIdx] ??
+            pendingModelForEffort.defaultEffort ??
+            efforts[0]!;
+          const updated: GlitchSettings = {
+            ...settings,
+            model: pendingModelForEffort.id,
+            effort: chosenEffort,
+          };
+          syncSettings(updated);
+          addSystemMessage(
+            `✓ Modelo seleccionado: ${pendingModelForEffort.name} | ${pendingModelForEffort.id} (Esfuerzo: ${chosenEffort.toUpperCase()})`,
+          );
+          setPendingModelForEffort(null);
+          setActiveDialog('none');
+          return;
+        }
+        return;
+      }
+
       const currentPage = modelPages[modelPageIdx] ?? modelPages[0];
       const pageModels = currentPage?.models ?? [];
 
@@ -593,10 +794,24 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         }
         const picked = pageModels[dialogCursor];
         if (picked) {
+          // Si el modelo soporta varios niveles de esfuerzo, permite elegir el effort ahí mismo
+          if (picked.supportedEfforts.length > 1) {
+            const defaultEffort =
+              picked.supportedEfforts.includes(settings.effort)
+                ? settings.effort
+                : (picked.defaultEffort ?? picked.supportedEfforts[0]!);
+            const effIdx = Math.max(
+              0,
+              picked.supportedEfforts.indexOf(defaultEffort),
+            );
+            setModelEffortIdx(effIdx);
+            setPendingModelForEffort(picked);
+            return;
+          }
+
           const nextEffort =
-            picked.supportedEfforts.length > 0 &&
-            !picked.supportedEfforts.includes(settings.effort)
-              ? (picked.defaultEffort ?? picked.supportedEfforts[0]!)
+            picked.supportedEfforts.length === 1
+              ? picked.supportedEfforts[0]!
               : settings.effort;
           const updated: GlitchSettings = {
             ...settings,
@@ -656,7 +871,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    // Autocompletado de Slash Commands cuando se escribe /
+    // Autocompletado de Slash Commands (si buscas /clear o /cl se selecciona el original /new)
     if (matchingSlash.length > 0) {
       if (key.upArrow) {
         setSuggestionIdx((prev) =>
@@ -716,7 +931,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
 
     if (key.return) {
-      // Si estamos editando un prompt de la cola (ej. subimos 2 veces al #2 de 3), se actualiza en esa MISMA posición de la fila
       if (
         editingQueueIdx !== null &&
         editingQueueIdx >= 0 &&
@@ -736,6 +950,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
       if (
         matchingSlash.length > 0 &&
+        !inputText.trim().includes(' ') &&
         inputText.trim() !== matchingSlash[suggestionIdx]?.cmd &&
         !SLASH_COMMANDS.some((s) => s.cmd === inputText.trim())
       ) {
@@ -767,7 +982,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
   });
 
-  // TUI de peligro de 3 segundos para --DAA (--dangerously-always-allow)
+  // TUI de peligro de 3 segundos (solo cuando se inició con la flag explícita --DAA / --dangerously-always-allow)
   if (daaSplashSeconds > 0) {
     return (
       <Box
@@ -779,11 +994,11 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         margin={1}
       >
         <Text bold color="red">
-          ⚠ ADVERTENCIA DE SEGURIDAD: MODO --DAA (--dangerously-always-allow) ACTIVO
+          ⚠ ADVERTENCIA DE SEGURIDAD: FLAG --DAA (--dangerously-always-allow) DETECTADA
         </Text>
         <Box marginTop={1} flexDirection="column">
           <Text color="yellow">
-            • Glitch CLI se está ejecutando en modo Always Allow y SIN SANDBOX.
+            • Has iniciado Glitch CLI con --DAA: modo Always Allow y SIN SANDBOX.
           </Text>
           <Text color="yellow">
             • Tiene acceso completo a todo tu PC sin importar desde qué carpeta lo abras (Downloads, System32, etc.).
@@ -893,6 +1108,46 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         </Box>
       )}
 
+      {/* Panel de atajos instantáneo al presionar ? */}
+      {showShortcutsPanel && activeDialog === 'none' && (
+        <Box
+          flexDirection="column"
+          borderStyle="round"
+          borderColor="cyan"
+          paddingX={2}
+          paddingY={1}
+          marginBottom={1}
+        >
+          <Text bold color="cyan">
+            Atajos y Comandos Rápidos (presiona ? de nuevo para ocultar)
+          </Text>
+          <Text color="white">
+            {'  /new                      Iniciar conversación limpia (alias: /clear, /cls, /reset)'}
+          </Text>
+          <Text color="white">
+            {'  /resume                   Retomar conversación guardada (alias: /continue, /history)'}
+          </Text>
+          <Text color="white">
+            {'  /model [id] [effort]      Cambiar modelo y esfuerzo (ej. /model gemini-4-argon high)'}
+          </Text>
+          <Text color="white">
+            {'  /effort [low|medium|high] Cambiar esfuerzo en vivo sin reiniciar'}
+          </Text>
+          <Text color="white">
+            {'  /settings                 Panel de Modo, Sub-Modo, Esfuerzo, Thoughts y Aviso --DAA'}
+          </Text>
+          <Text color="white">
+            {'  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agent en vivo'}
+          </Text>
+          <Text color="white">
+            {'  ↑ / ↓ con cola activa     Subir/bajar en la fila (Queue) y Enter para editar en esa posición'}
+          </Text>
+          <Text color="gray">
+            {'  Flags CLI: glitch --DAA | glitch --dangerously-always-allow | glitch --model <id> | glitch -m "<id>"'}
+          </Text>
+        </Box>
+      )}
+
       {/* Fila de espera (Queue FIFO) visible con soporte de edición ↑ / ↓ */}
       {queuedPrompts.length > 0 && activeDialog === 'none' && (
         <Box
@@ -915,6 +1170,32 @@ export const TuiApp: React.FC<TuiAppProps> = ({
               >
                 {isEditingThis ? '✎ ' : '  '}#{idx + 1}: {qp}
                 {isEditingThis ? ' (editando en esta posición)' : ''}
+              </Text>
+            );
+          })}
+        </Box>
+      )}
+
+      {/* Diálogo interactivo /resume */}
+      {activeDialog === 'resume' && (
+        <Box
+          flexDirection="column"
+          borderStyle="round"
+          borderColor="cyan"
+          paddingX={2}
+          paddingY={1}
+          marginBottom={1}
+        >
+          <Text bold color="cyan">
+            Retomar Conversación (/resume) — ↑/↓ para elegir, Enter cargar, Esc salir
+          </Text>
+          {savedSessionsList.map((s, idx) => {
+            const isSelected = idx === dialogCursor;
+            return (
+              <Text key={s.id} color={isSelected ? 'cyan' : 'white'}>
+                {isSelected ? '❯ ' : '  '}
+                {s.title.padEnd(48, ' ')} | {s.model.padEnd(24, ' ')} |{' '}
+                {s.updatedAt} ({s.history.length} turnos)
               </Text>
             );
           })}
@@ -1019,68 +1300,99 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             </Text>
           </Box>
 
-          {/* Pestañas de familias */}
-          <Box flexDirection="row" marginBottom={1}>
-            <Text color="cyan" bold>
-              {'◄ '}
-            </Text>
-            {modelPages.map((page, pIdx) => {
-              const isCurrentPage = pIdx === modelPageIdx;
-              return (
-                <Box key={page.family} marginRight={2}>
-                  <Text
-                    bold={isCurrentPage}
-                    color={isCurrentPage ? 'cyan' : 'gray'}
-                  >
-                    {`[Pág ${pIdx + 1}/${modelPages.length}: ${page.title}]`}
-                  </Text>
-                </Box>
-              );
-            })}
-            <Text color="cyan" bold>
-              {'►'}
-            </Text>
-          </Box>
-
-          {/* Encabezado de tabla separada */}
-          <Box flexDirection="column" marginBottom={1}>
-            <Text bold color="white">
-              {'  '}
-              {'NOMBRE DEL MODELO'.padEnd(36, ' ')}
-              {' | '}
-              {'ID MODELO'.padEnd(32, ' ')}
-              {' | '}
-              {'FECHA'.padEnd(10, ' ')}
-              {' | '}
-              {'ESFUERZO'}
-            </Text>
-            <Text color="gray">{'  ' + '─'.repeat(104)}</Text>
-          </Box>
-
-          {/* Filas de la familia actual (ordenadas de más reciente a más antiguo) */}
-          {(modelPages[modelPageIdx]?.models ?? []).map((m, idx) => {
-            const isSelected = idx === dialogCursor;
-            const isCurrent = m.id === settings.model;
-            const cols = formatModelRowColumns(m, isCurrent, 36, 32, 10);
-            return (
-              <Box key={m.id} flexDirection="row">
-                <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
-                  {isSelected ? '❯ ' : '  '}
-                  {cols.nameCol}
+          {pendingModelForEffort ? (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white">
+                Selecciona el nivel de ESFUERZO para {pendingModelForEffort.name}{' '}
+                (←/→ y Enter, Esc volver):
+              </Text>
+              <Box flexDirection="row" marginTop={1}>
+                {pendingModelForEffort.supportedEfforts.map((ef, idx) => {
+                  const isChosen = idx === modelEffortIdx;
+                  return (
+                    <Box key={ef} marginRight={3}>
+                      <Text
+                        bold={isChosen}
+                        color={isChosen ? 'cyan' : 'white'}
+                      >
+                        {isChosen ? `❯ [${ef.toUpperCase()}]` : `  ${ef.toUpperCase()}`}
+                      </Text>
+                    </Box>
+                  );
+                })}
+              </Box>
+            </Box>
+          ) : (
+            <>
+              {/* Pestañas de familias */}
+              <Box flexDirection="row" marginBottom={1}>
+                <Text color="cyan" bold>
+                  {'◄ '}
                 </Text>
-                <Text color="gray">{' | '}</Text>
-                <Text color={isSelected ? 'cyan' : 'gray'}>{cols.idCol}</Text>
-                <Text color="gray">{' | '}</Text>
-                <Text color={isSelected ? 'cyan' : 'green'}>
-                  {cols.dateCol}
-                </Text>
-                <Text color="gray">{' | '}</Text>
-                <Text color={isSelected ? 'cyan' : 'yellow'}>
-                  {cols.effortsCol}
+                {modelPages.map((page, pIdx) => {
+                  const isCurrentPage = pIdx === modelPageIdx;
+                  return (
+                    <Box key={page.family} marginRight={2}>
+                      <Text
+                        bold={isCurrentPage}
+                        color={isCurrentPage ? 'cyan' : 'gray'}
+                      >
+                        {`[Pág ${pIdx + 1}/${modelPages.length}: ${page.title}]`}
+                      </Text>
+                    </Box>
+                  );
+                })}
+                <Text color="cyan" bold>
+                  {'►'}
                 </Text>
               </Box>
-            );
-          })}
+
+              {/* Encabezado de tabla separada */}
+              <Box flexDirection="column" marginBottom={1}>
+                <Text bold color="white">
+                  {'  '}
+                  {'NOMBRE DEL MODELO'.padEnd(36, ' ')}
+                  {' | '}
+                  {'ID MODELO'.padEnd(32, ' ')}
+                  {' | '}
+                  {'FECHA'.padEnd(10, ' ')}
+                  {' | '}
+                  {'ESFUERZO'}
+                </Text>
+                <Text color="gray">{'  ' + '─'.repeat(104)}</Text>
+              </Box>
+
+              {/* Filas de la familia actual (ordenadas de más reciente a más antiguo) */}
+              {(modelPages[modelPageIdx]?.models ?? []).map((m, idx) => {
+                const isSelected = idx === dialogCursor;
+                const isCurrent = m.id === settings.model;
+                const cols = formatModelRowColumns(m, isCurrent, 36, 32, 10);
+                return (
+                  <Box key={m.id} flexDirection="row">
+                    <Text
+                      color={isSelected ? 'cyan' : 'white'}
+                      bold={isSelected}
+                    >
+                      {isSelected ? '❯ ' : '  '}
+                      {cols.nameCol}
+                    </Text>
+                    <Text color="gray">{' | '}</Text>
+                    <Text color={isSelected ? 'cyan' : 'gray'}>
+                      {cols.idCol}
+                    </Text>
+                    <Text color="gray">{' | '}</Text>
+                    <Text color={isSelected ? 'cyan' : 'green'}>
+                      {cols.dateCol}
+                    </Text>
+                    <Text color="gray">{' | '}</Text>
+                    <Text color={isSelected ? 'cyan' : 'yellow'}>
+                      {cols.effortsCol}
+                    </Text>
+                  </Box>
+                );
+              })}
+            </>
+          )}
         </Box>
       )}
 
@@ -1122,7 +1434,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         </Box>
       )}
 
-      {/* Menú autocompletado de Slash Commands */}
+      {/* Menú autocompletado de Slash Commands (muestra el comando original al buscar un alias como /clear -> /new) */}
       {matchingSlash.length > 0 && activeDialog === 'none' && (
         <Box
           flexDirection="column"

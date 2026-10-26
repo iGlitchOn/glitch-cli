@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { render } from 'ink';
-import { loadSettings } from './config/settings.js';
+import { hasAlwaysAllowFlag, loadSettings } from './config/settings.js';
 import { printHelpMenu } from './core/inputLoop.js';
 import { TuiApp } from './ui/TuiApp.js';
 
@@ -23,10 +23,14 @@ export async function main(
     process.stdout.write('\x1b[2J\x1b[H');
   }
 
-  // Sin sandbox: acceso completo al PC desde cualquier directorio, con Always Allow (--DAA) por defecto
+  const launchedWithDaaFlag = hasAlwaysAllowFlag(argv);
   const initialSettings = loadSettings(undefined, argv);
   const instance = render(
-    React.createElement(TuiApp, { initialSettings, version: '0.1.0' }),
+    React.createElement(TuiApp, {
+      initialSettings,
+      version: '0.1.0',
+      launchedWithDaaFlag,
+    }),
   );
   await instance.waitUntilExit();
 }
