@@ -1,6 +1,6 @@
 import os from 'node:os';
 import React, { useState, useEffect, useRef } from 'react';
-import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import { Box, Static, Text, useApp, useInput } from 'ink';
 import type { Part } from '@google/genai';
 import {
   formatAuthSummary,
@@ -87,12 +87,11 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   launchedWithDaaFlag = false,
 }) => {
   const { exit } = useApp();
-  useStdout();
   const columns = process.stdout.columns ?? 100;
-  const rows = process.stdout.rows ?? 30;
 
   const sessionRef = useRef<SessionState>(new SessionState(initialSettings));
   const [sessionId, setSessionId] = useState<string>(() => createSessionId());
+  const [staticEpoch, setStaticEpoch] = useState(0);
   const sessionCreatedAtRef = useRef<string>(new Date().toISOString());
   const [envCounts] = useState(() => detectEnvironmentCounts());
 
@@ -460,8 +459,12 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       sessionRef.current.history.length = 0;
       const nextId = createSessionId();
       sessionCreatedAtRef.current = new Date().toISOString();
+      if (process.stdout.isTTY) {
+        process.stdout.write('\x1b[2J\x1b[H');
+      }
       setSessionId(nextId);
       setMessages([]);
+      setStaticEpoch((prev) => prev + 1);
       setShowShortcutsPanel(false);
       return;
     }
@@ -1273,92 +1276,112 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const headerInfo = formatClaudeStyleHeaderInfo(settings, version);
   const activeAgentCount = 1;
 
+  type StaticEntry =
+    | { kind: 'banner'; id: string }
+    | {
+        kind: 'msg';
+        id: string;
+        msg: SavedUiMessage & { turnNumber: number };
+      };
+
+  const staticEntries: StaticEntry[] = [
+    { kind: 'banner', id: `banner-${staticEpoch}` },
+    ...numberedMessages.map((m) => ({
+      kind: 'msg' as const,
+      id: `${staticEpoch}-${m.id}`,
+      msg: m,
+    })),
+  ];
+
   return (
-    <Box
-      flexDirection="column"
-      minHeight={Math.max(22, rows - 1)}
-      justifyContent="space-between"
-      paddingX={1}
-    >
-      {/* ZONA SUPERIOR: Cabecera estilo Claude Code + Respuestas del Modelo + Diálogos */}
-      <Box flexDirection="column" flexGrow={1}>
-        <Box flexDirection="column" marginBottom={1}>
-          <Box flexDirection="row" alignItems="center">
-            <Box flexDirection="column" marginRight={2}>
-              {GLITCH_MINI_LOGO_LINES.map((logoLine, idx) => (
-                <Text key={idx} color="cyan" bold>
-                  {logoLine}
-                </Text>
-              ))}
-            </Box>
-            <Box flexDirection="column">
-              <Box>
-                <Text bold color="white">
-                  {headerInfo.line1Title}{' '}
-                </Text>
-                <Text color="gray">{headerInfo.line1Version}</Text>
-              </Box>
-              <Text color="gray">{headerInfo.line2ModelAuth}</Text>
-              <Text color="gray">{headerInfo.line3Cwd}</Text>
-            </Box>
-          </Box>
-
-          {messages.length === 0 && activeDialog === 'none' && (
-            <Box flexDirection="column" marginTop={1}>
-              {GLITCH_ASCII_LINES.map((line, i) => (
-                <Text key={i} color="gray">
-                  {artPad}
-                  {line}
-                </Text>
-              ))}
-            </Box>
-          )}
-        </Box>
-
-        {/* Historial numerado: Mensaje 1 (10/25/2026 9:14 PM) > ... y Respuesta 1 (6s) > ... */}
-        {numberedMessages.map((m) => (
-          <Box key={m.id} flexDirection="column" marginBottom={1}>
-            {m.role === 'user' && (
-              <Box>
-                <Text color="cyan" bold>
-                  {`${msgPrefixLabel} ${m.turnNumber}${m.timestamp ? ` (${m.timestamp})` : ''} > `}
-                </Text>
-                <Text color="white" bold>
-                  {m.text}
-                </Text>
-              </Box>
-            )}
-            {m.role === 'model' && (
-              <Box flexDirection="column">
-                {m.thoughtText && settings.thoughts && (
-                  <Box
-                    borderStyle="single"
-                    borderColor="gray"
-                    paddingX={1}
-                    marginBottom={1}
-                  >
-                    <Text color="gray" italic>
-                      💭 {m.thoughtText}
-                    </Text>
+    <Box flexDirection="column" paddingX={1}>
+      {/* ZONA ESTÁTICA (<Static>): Se imprime UNA SOLA VEZ en el buffer de la terminal.
+          Jamás se vuelve a redibujar al moverte o escribir, eliminando el duplicado al subir con el mouse. */}
+      <Static items={staticEntries}>
+        {(entry) => {
+          if (entry.kind === 'banner') {
+            return (
+              <Box key={entry.id} flexDirection="column" marginBottom={1}>
+                <Box flexDirection="row" alignItems="center">
+                  <Box flexDirection="column" marginRight={2}>
+                    {GLITCH_MINI_LOGO_LINES.map((logoLine, idx) => (
+                      <Text key={idx} color="cyan" bold>
+                        {logoLine}
+                      </Text>
+                    ))}
                   </Box>
-                )}
-                <Box>
-                  <Text color="green" bold>
-                    {`${replyPrefixLabel} ${m.turnNumber}${m.durationText ? ` (${m.durationText})` : ''} > `}
-                  </Text>
-                  <Text color="white">{m.text}</Text>
+                  <Box flexDirection="column">
+                    <Box>
+                      <Text bold color="white">
+                        {headerInfo.line1Title}{' '}
+                      </Text>
+                      <Text color="gray">{headerInfo.line1Version}</Text>
+                    </Box>
+                    <Text color="gray">{headerInfo.line2ModelAuth}</Text>
+                    <Text color="gray">{headerInfo.line3Cwd}</Text>
+                  </Box>
+                </Box>
+
+                <Box flexDirection="column" marginTop={1}>
+                  {GLITCH_ASCII_LINES.map((line, i) => (
+                    <Text key={i} color="gray">
+                      {artPad}
+                      {line}
+                    </Text>
+                  ))}
                 </Box>
               </Box>
-            )}
-            {m.role === 'system' && (
-              <Box>
-                <Text color="yellow">{m.text}</Text>
-              </Box>
-            )}
-          </Box>
-        ))}
+            );
+          }
 
-        {/* Texto parcial en streaming dentro del área de conversación */}
+          const m = entry.msg;
+          return (
+            <Box key={entry.id} flexDirection="column" marginBottom={1}>
+              {m.role === 'user' && (
+                <Box>
+                  <Text color="cyan" bold>
+                    {`${msgPrefixLabel} ${m.turnNumber}${m.timestamp ? ` (${m.timestamp})` : ''} > `}
+                  </Text>
+                  <Text color="white" bold>
+                    {m.text}
+                  </Text>
+                </Box>
+              )}
+              {m.role === 'model' && (
+                <Box flexDirection="column">
+                  {m.thoughtText && settings.thoughts && (
+                    <Box
+                      borderStyle="single"
+                      borderColor="gray"
+                      paddingX={1}
+                      marginBottom={1}
+                    >
+                      <Text color="gray" italic>
+                        💭 {m.thoughtText}
+                      </Text>
+                    </Box>
+                  )}
+                  <Box>
+                    <Text color="green" bold>
+                      {`${replyPrefixLabel} ${m.turnNumber}${m.durationText ? ` (${m.durationText})` : ''} > `}
+                    </Text>
+                    <Text color="white">{m.text}</Text>
+                  </Box>
+                </Box>
+              )}
+              {m.role === 'system' && (
+                <Box>
+                  <Text color="yellow">{m.text}</Text>
+                </Box>
+              )}
+            </Box>
+          );
+        }}
+      </Static>
+
+      {/* ZONA DINÁMICA INFERIOR (compacta): Streaming en curso + Diálogo activo (que reemplaza al chat) o Caja de Chat */}
+      <Box flexDirection="column">
+        {/* Texto parcial en streaming mientras el modelo está respondiendo */}
         {isStreaming && (liveThought || liveText) && (
           <Box flexDirection="column" marginBottom={1}>
             {liveThought && settings.thoughts && (
@@ -1379,7 +1402,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
-        {/* Panel de Agentes y Chats en tiempo real + Historial (abierto con la flecha ← en chat vacío) */}
+        {/* Cuando hay un diálogo activo (/settings, /model, /auth, /resume, ← chats), REEMPLAZA el área del chat abajo */}
         {activeDialog === 'agents_chats' && (
           <Box
             flexDirection="column"
@@ -1387,7 +1410,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             borderColor="cyan"
             paddingX={2}
             paddingY={1}
-            marginBottom={1}
           >
             <Box
               flexDirection="row"
@@ -1411,7 +1433,10 @@ export const TuiApp: React.FC<TuiAppProps> = ({
                 ? 'Active Agent / Current Session (Real-Time):'
                 : 'Agente / Sesión Activa en Tiempo Real:'}
             </Text>
-            <Text color={dialogCursor === 0 ? 'cyan' : 'white'} bold={dialogCursor === 0}>
+            <Text
+              color={dialogCursor === 0 ? 'cyan' : 'white'}
+              bold={dialogCursor === 0}
+            >
               {dialogCursor === 0 ? '❯ ' : '  '}
               {isStreaming
                 ? lang === 'en'
@@ -1466,7 +1491,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
-        {/* Diálogo interactivo /resume */}
         {activeDialog === 'resume' && (
           <Box
             flexDirection="column"
@@ -1474,7 +1498,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             borderColor="cyan"
             paddingX={2}
             paddingY={1}
-            marginBottom={1}
           >
             <Text bold color="cyan">
               Retomar Conversación (/resume) — ↑/↓ para elegir, Enter cargar, Esc salir
@@ -1492,7 +1515,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
-        {/* Diálogo interactivo /auth */}
         {activeDialog === 'auth' && (
           <Box
             flexDirection="column"
@@ -1500,7 +1522,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             borderColor="cyan"
             paddingX={2}
             paddingY={1}
-            marginBottom={1}
           >
             <Text bold color="cyan">
               Configuración de Autenticación (/auth)
@@ -1567,7 +1588,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
-        {/* Diálogo interactivo /model */}
         {activeDialog === 'model' && (
           <Box
             flexDirection="column"
@@ -1575,7 +1595,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             borderColor="cyan"
             paddingX={2}
             paddingY={1}
-            marginBottom={1}
           >
             <Box
               flexDirection="row"
@@ -1685,11 +1704,11 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
-        {/* Diálogo interactivo /settings (/ajustes) con segunda TUI explicativa contextual */}
+        {/* TUI de /ajustes (/settings) y su explicación en la ZONA INFERIOR, reemplazando la caja de chat */}
         {activeDialog === 'settings' && (() => {
           const detail = getSettingHelpDetail(dialogCursor, lang);
           return (
-            <Box flexDirection="column" marginBottom={1}>
+            <Box flexDirection="column">
               <Box
                 flexDirection="column"
                 borderStyle="round"
@@ -1743,7 +1762,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
                 </Text>
               </Box>
 
-              {/* Segunda TUI contextual que explica la opción sobre la que está el cursor */}
               <Box
                 flexDirection="column"
                 borderStyle="round"
@@ -1770,10 +1788,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             </Box>
           );
         })()}
-      </Box>
 
-      {/* ZONA INFERIOR ANCLADA ABAJO */}
-      <Box flexDirection="column">
         {showShortcutsPanel && activeDialog === 'none' && (
           <Box
             flexDirection="column"
@@ -1941,7 +1956,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
-        {/* Caja de entrada anclada abajo */}
+        {/* Caja de entrada anclada abajo (se oculta mientras hay un diálogo como /ajustes abierto) */}
         {activeDialog === 'none' && (
           <Box
             borderStyle="round"
