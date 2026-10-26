@@ -5,9 +5,11 @@ import type { Part } from '@google/genai';
 import {
   formatAuthSummary,
   formatPermissionModeLabel,
+  formatSubModeLabel,
   isAuthConfigured,
   maskApiKey,
   saveSettings,
+  type AppLanguage,
   type CustomEndpointFormat,
   type EffortLevel,
   type GlitchSettings,
@@ -41,6 +43,11 @@ import {
   formatInputTopRightInfo,
   formatStatusBar,
 } from './statusBar.js';
+import {
+  formatCleanApiError,
+  formatElapsedDuration,
+  formatMessageTimestamp,
+} from '../core/errorFormat.js';
 import { SessionState } from '../core/session.js';
 import {
   createSessionId,
@@ -57,7 +64,13 @@ import {
 import { CustomProviderAdapter } from '../providers/custom.js';
 import type { ProviderAdapter } from '../providers/types.js';
 
-type ActiveDialog = 'none' | 'auth' | 'model' | 'settings' | 'resume';
+type ActiveDialog =
+  | 'none'
+  | 'auth'
+  | 'model'
+  | 'settings'
+  | 'resume'
+  | 'agents_chats';
 
 export interface TuiAppProps {
   initialSettings: GlitchSettings;
@@ -81,6 +94,8 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const [envCounts] = useState(() => detectEnvironmentCounts());
 
   const [settings, setSettings] = useState<GlitchSettings>(initialSettings);
+  const lang: AppLanguage = settings.language ?? 'es';
+
   const [availableModels, setAvailableModels] = useState(
     sessionRef.current.availableModels,
   );
@@ -96,6 +111,10 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [inputText, setInputText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingElapsedMs, setStreamingElapsedMs] = useState(0);
+  const streamStartTimeRef = useRef<number>(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   const [liveThought, setLiveThought] = useState('');
   const [liveText, setLiveText] = useState('');
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(() =>
@@ -103,10 +122,17 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   );
   const [suggestionIdx, setSuggestionIdx] = useState(0);
 
-  // Cola FIFO de prompts en espera y edición en su misma posición con ↑ / ↓
+  // Confirmación de salida con doble Ctrl+C
+  const [ctrlCPending, setCtrlCPending] = useState(false);
+
+  // Cola FIFO de prompts en espera, edición con ↑/↓ y confirmación de borrado TUI
   const queueRef = useRef<string[]>([]);
   const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
   const [editingQueueIdx, setEditingQueueIdx] = useState<number | null>(null);
+  const [confirmDeleteQueueIdx, setConfirmDeleteQueueIdx] = useState<
+    number | null
+  >(null);
+  const originalEditingQueueTextRef = useRef<string>('');
   const draftInputRef = useRef<string>('');
 
   // Estado del diálogo /auth
@@ -128,7 +154,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   );
   const [tempKey, setTempKey] = useState('');
 
-  // Estado de diálogos /model, /settings y /resume
+  // Estado de diálogos /model, /settings, /resume y panel de agentes/chats (←)
   const [dialogCursor, setDialogCursor] = useState(0);
   const [modelPageIdx, setModelPageIdx] = useState(0);
   const [pendingModelForEffort, setPendingModelForEffort] =
@@ -194,7 +220,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       if (daaSplashSeconds === 1) {
         setDaaSplashSeconds(0);
         addSystemMessage(
-          '⚠ Flag --DAA activa: si quieres desactivar este mensaje inicial de 3 segundos, configúralo en /settings (Advertencia --DAA al inicio: OFF).',
+          lang === 'en'
+            ? '⚠ --DAA flag active: to disable this 3s startup notice, configure it in /settings.'
+            : '⚠ Flag --DAA activa: si quieres desactivar este mensaje inicial de 3 segundos, configúralo en /ajustes (Advertencia --DAA al inicio: OFF).',
         );
       } else {
         setDaaSplashSeconds((prev) => prev - 1);
@@ -203,6 +231,27 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     return () => clearTimeout(timer);
   }, [daaSplashSeconds]);
 
+  // Cronómetro en tiempo real para "Pensando... ("ESC" para cancelar, 1h 30m)"
+  useEffect(() => {
+    if (!isStreaming) {
+      setStreamingElapsedMs(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setStreamingElapsedMs(Date.now() - streamStartTimeRef.current);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isStreaming]);
+
+  // Temporizador para limpiar el estado de confirmación de doble Ctrl+C tras 3 segundos
+  useEffect(() => {
+    if (!ctrlCPending) return;
+    const timer = setTimeout(() => {
+      setCtrlCPending(false);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [ctrlCPending]);
+
   useEffect(() => {
     if (isAuthConfigured(initialSettings)) {
       void refreshModels(initialSettings);
@@ -210,7 +259,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   }, []);
 
   const matchingSlash =
-    activeDialog === 'none' ? matchSlashCommands(inputText) : [];
+    activeDialog === 'none' && confirmDeleteQueueIdx === null
+      ? matchSlashCommands(inputText)
+      : [];
 
   const buildAdapter = (): ProviderAdapter => {
     const cur = sessionRef.current.settings;
@@ -227,14 +278,21 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const runSinglePromptNow = async (userPrompt: string): Promise<void> => {
     const session = sessionRef.current;
     session.isRequestActive = true;
+    const startTs = Date.now();
+    streamStartTimeRef.current = startTs;
+    setStreamingElapsedMs(0);
     setIsStreaming(true);
     setLiveThought('');
     setLiveText('');
+
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
 
     const userMsg: SavedUiMessage = {
       id: `${Date.now()}-${Math.random()}-u`,
       role: 'user',
       text: userPrompt,
+      timestamp: formatMessageTimestamp(new Date()),
     };
     setMessages((prev) => [...prev, userMsg]);
     session.history.push({ role: 'user', parts: [{ text: userPrompt }] });
@@ -251,7 +309,11 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         effort: live.effort,
         includeThoughts: live.includeThoughts,
         subMode: live.subMode,
+        abortSignal: abortController.signal,
       })) {
+        if (abortController.signal.aborted) {
+          break;
+        }
         if (chunk.rawParts && chunk.rawParts.length > 0) {
           collectedParts.push(...chunk.rawParts);
         }
@@ -263,6 +325,31 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           accText += chunk.text;
           setLiveText(accText);
         }
+      }
+
+      const elapsed = formatElapsedDuration(Date.now() - startTs);
+
+      if (abortController.signal.aborted) {
+        const cancelNote =
+          lang === 'en' ? '[Cancelled with ESC]' : '[Cancelado con ESC]';
+        const finalText = accText ? `${accText} ${cancelNote}` : cancelNote;
+        session.history.push({
+          role: 'model',
+          parts: [{ text: finalText }],
+        });
+        const cancelledMsg: SavedUiMessage = {
+          id: `${Date.now()}-${Math.random()}-m`,
+          role: 'model',
+          text: finalText,
+          thoughtText: accThought || undefined,
+          durationText: elapsed,
+        };
+        setMessages((prev) => {
+          const next = [...prev, cancelledMsg];
+          persistCurrentSession(next);
+          return next;
+        });
+        return;
       }
 
       session.history.push({
@@ -278,6 +365,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         role: 'model',
         text: accText || '(sin respuesta de texto)',
         thoughtText: accThought || undefined,
+        durationText: elapsed,
       };
       setMessages((prev) => {
         const next = [...prev, modelMsg];
@@ -285,8 +373,17 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         return next;
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      addSystemMessage(`✗ Error: ${msg}`);
+      if (abortController.signal.aborted) {
+        addSystemMessage(
+          lang === 'en'
+            ? '⚠ Request cancelled by user (ESC).'
+            : '⚠ Petición cancelada por el usuario (ESC).',
+        );
+      } else {
+        addSystemMessage(formatCleanApiError(err));
+      }
+    } finally {
+      abortControllerRef.current = null;
     }
   };
 
@@ -317,6 +414,14 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     })();
   };
 
+  const openAgentsAndChatsDrawer = () => {
+    persistCurrentSession(messages);
+    const saved = listSavedSessions();
+    setSavedSessionsList(saved);
+    setDialogCursor(0);
+    setActiveDialog('agents_chats');
+  };
+
   const executeInputCommand = (raw: string) => {
     const trimmed = raw.trim();
     if (!trimmed) return;
@@ -326,6 +431,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       : trimmed;
 
     if (resolved === '/exit') {
+      persistCurrentSession(messages);
       exit();
       return;
     }
@@ -348,10 +454,13 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
     if (resolved === '/resume' || resolved.startsWith('/resume ')) {
       const arg = resolved.slice('/resume'.length).trim();
+      persistCurrentSession(messages);
       const list = listSavedSessions();
       if (list.length === 0) {
         addSystemMessage(
-          'ℹ No hay conversaciones guardadas todavía para retomar con /resume.',
+          lang === 'en'
+            ? 'ℹ No saved conversations yet to resume.'
+            : 'ℹ No hay conversaciones guardadas todavía para retomar.',
         );
         return;
       }
@@ -402,7 +511,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     if (resolved === '/model' || resolved.startsWith('/model ')) {
       if (sessionRef.current.isRequestActive) {
         addSystemMessage(
-          '⚠ No puedes cambiar de modelo mientras hay una petición activa. Espera a que termine la tarea actual.',
+          lang === 'en'
+            ? '⚠ Cannot switch model while a request is active. Wait for the current task to finish.'
+            : '⚠ No puedes cambiar de modelo mientras hay una petición activa. Espera a que termine la tarea actual.',
         );
         return;
       }
@@ -486,7 +597,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
     if (resolved.startsWith('/')) {
       addSystemMessage(
-        `✗ Comando desconocido: ${trimmed}. Usa /help para ver los comandos disponibles.`,
+        lang === 'en'
+          ? `✗ Unknown command: ${trimmed}. Type /help to see available commands.`
+          : `✗ Comando desconocido: ${trimmed}. Usa /ayuda para ver los comandos disponibles.`,
       );
       return;
     }
@@ -501,11 +614,54 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   };
 
   useInput((input, key) => {
+    // Doble Ctrl+C para salir de Glitch CLI
+    if (key.ctrl && input.toLowerCase() === 'c') {
+      if (ctrlCPending) {
+        persistCurrentSession(messages);
+        exit();
+      } else {
+        setCtrlCPending(true);
+      }
+      return;
+    }
+
     if (daaSplashSeconds > 0) {
       return;
     }
 
-    // Atajo global en vivo: Shift+Tab o Alt+P alterna Sub-Modo Plan <-> Agent
+    // Confirmación TUI cuando el usuario borra por completo un prompt de la fila de espera: "¿Borrar posición #N?"
+    if (confirmDeleteQueueIdx !== null) {
+      const lower = input.toLowerCase();
+      if (key.return || lower === 's' || lower === 'y') {
+        queueRef.current.splice(confirmDeleteQueueIdx, 1);
+        syncQueueState();
+        setConfirmDeleteQueueIdx(null);
+        setEditingQueueIdx(null);
+        setInputText(draftInputRef.current);
+        draftInputRef.current = '';
+        return;
+      }
+      if (key.escape || lower === 'n') {
+        const restored = originalEditingQueueTextRef.current;
+        setConfirmDeleteQueueIdx(null);
+        setInputText(restored);
+        return;
+      }
+      return;
+    }
+
+    // ESC durante respuesta en streaming: cancela la petición actual
+    if (
+      key.escape &&
+      isStreaming &&
+      activeDialog === 'none' &&
+      editingQueueIdx === null
+    ) {
+      abortControllerRef.current?.abort();
+      return;
+    }
+
+    // Atajo global en vivo: Shift+Tab o Alt+P alterna Sub-Modo Plan <-> Agente/Agent
     if ((key.tab && key.shift) || (key.meta && input.toLowerCase() === 'p')) {
       const nextSubMode: SubMode = toggleSubMode(
         sessionRef.current.settings.subMode,
@@ -518,6 +674,17 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
+    // Tecla ← (flecha izquierda) o '<' en el chat normal con barra vacía: abre Agentes y Chats en tiempo real + Historial
+    if (
+      activeDialog === 'none' &&
+      editingQueueIdx === null &&
+      inputText.length === 0 &&
+      (key.leftArrow || input === '<')
+    ) {
+      openAgentsAndChatsDrawer();
+      return;
+    }
+
     // Atajo '?' instantáneo cuando la barra de entrada está vacía y no hay diálogo abierto
     if (
       activeDialog === 'none' &&
@@ -527,6 +694,51 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       !key.meta
     ) {
       setShowShortcutsPanel((prev) => !prev);
+      return;
+    }
+
+    // Manejo del panel de Agentes y Chats en tiempo real + Historial (abierto con ←)
+    if (activeDialog === 'agents_chats') {
+      const totalEntries = 1 + savedSessionsList.length; // 0 = Agente/Chat actual en vivo, 1..N = historial guardado
+      if (key.escape || key.rightArrow) {
+        setActiveDialog('none');
+        return;
+      }
+      if (key.upArrow && totalEntries > 0) {
+        setDialogCursor((prev) => (prev > 0 ? prev - 1 : totalEntries - 1));
+        return;
+      }
+      if (key.downArrow && totalEntries > 0) {
+        setDialogCursor((prev) => (prev < totalEntries - 1 ? prev + 1 : 0));
+        return;
+      }
+      if (key.return) {
+        if (dialogCursor === 0) {
+          // Seguir en el agente/chat actual
+          setActiveDialog('none');
+          return;
+        }
+        const picked = savedSessionsList[dialogCursor - 1];
+        if (picked) {
+          sessionRef.current.history.length = 0;
+          sessionRef.current.history.push(...picked.history);
+          setSessionId(picked.id);
+          sessionCreatedAtRef.current = picked.createdAt;
+          setMessages([
+            ...picked.messages,
+            {
+              id: `${Date.now()}-resumed`,
+              role: 'system',
+              text:
+                lang === 'en'
+                  ? `✓ Switched to chat: "${picked.title}" (${picked.history.length} turns).`
+                  : `✓ Cambiado al chat: "${picked.title}" (${picked.history.length} turnos).`,
+            },
+          ]);
+        }
+        setActiveDialog('none');
+        return;
+      }
       return;
     }
 
@@ -804,18 +1016,18 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    // Manejo del diálogo /settings
+    // Manejo del diálogo /settings (/ajustes) — 6 opciones incluyendo Idioma
     if (activeDialog === 'settings') {
       if (key.escape) {
         setActiveDialog('none');
         return;
       }
       if (key.upArrow) {
-        setDialogCursor((prev) => (prev > 0 ? prev - 1 : 4));
+        setDialogCursor((prev) => (prev > 0 ? prev - 1 : 5));
         return;
       }
       if (key.downArrow) {
-        setDialogCursor((prev) => (prev < 4 ? prev + 1 : 0));
+        setDialogCursor((prev) => (prev < 5 ? prev + 1 : 0));
         return;
       }
       if (key.return || key.leftArrow || key.rightArrow) {
@@ -840,13 +1052,17 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           syncSettings({ ...cur, thoughts: !cur.thoughts });
         } else if (dialogCursor === 4) {
           syncSettings({ ...cur, hideDaaWarning: !cur.hideDaaWarning });
+        } else if (dialogCursor === 5) {
+          const nextLang: AppLanguage =
+            (cur.language ?? 'es') === 'es' ? 'en' : 'es';
+          syncSettings({ ...cur, language: nextLang });
         }
         return;
       }
       return;
     }
 
-    // Autocompletado de Slash Commands (si buscas /clear o /cl se selecciona el original /new)
+    // Autocompletado de Slash Commands (muestra comandos en el idioma activo)
     if (matchingSlash.length > 0) {
       if (key.upArrow) {
         setSuggestionIdx((prev) =>
@@ -863,7 +1079,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       if (key.tab) {
         const chosen = matchingSlash[suggestionIdx] ?? matchingSlash[0];
         if (chosen) {
-          setInputText(chosen.cmd + ' ');
+          setInputText(chosen.displayCmd[lang] + ' ');
           setSuggestionIdx(0);
         }
         return;
@@ -877,10 +1093,12 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         if (editingQueueIdx === null) {
           draftInputRef.current = inputText;
           const targetIdx = q.length - 1;
+          originalEditingQueueTextRef.current = q[targetIdx] ?? '';
           setEditingQueueIdx(targetIdx);
           setInputText(q[targetIdx] ?? '');
         } else if (editingQueueIdx > 0) {
           const targetIdx = editingQueueIdx - 1;
+          originalEditingQueueTextRef.current = q[targetIdx] ?? '';
           setEditingQueueIdx(targetIdx);
           setInputText(q[targetIdx] ?? '');
         }
@@ -890,6 +1108,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         const q = queueRef.current;
         if (editingQueueIdx < q.length - 1) {
           const targetIdx = editingQueueIdx + 1;
+          originalEditingQueueTextRef.current = q[targetIdx] ?? '';
           setEditingQueueIdx(targetIdx);
           setInputText(q[targetIdx] ?? '');
         } else {
@@ -913,10 +1132,12 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         !inputText.trim().startsWith('/')
       ) {
         const replacement = inputText.trim();
-        if (replacement) {
-          queueRef.current[editingQueueIdx] = replacement;
-          syncQueueState();
+        if (!replacement) {
+          setConfirmDeleteQueueIdx(editingQueueIdx);
+          return;
         }
+        queueRef.current[editingQueueIdx] = replacement;
+        syncQueueState();
         setEditingQueueIdx(null);
         setInputText(draftInputRef.current);
         draftInputRef.current = '';
@@ -926,8 +1147,12 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       if (
         matchingSlash.length > 0 &&
         !inputText.trim().includes(' ') &&
-        inputText.trim() !== matchingSlash[suggestionIdx]?.cmd &&
-        !SLASH_COMMANDS.some((s) => s.cmd === inputText.trim())
+        inputText.trim() !== matchingSlash[suggestionIdx]?.displayCmd[lang] &&
+        !SLASH_COMMANDS.some(
+          (s) =>
+            s.cmd === inputText.trim() ||
+            s.displayCmd[lang] === inputText.trim(),
+        )
       ) {
         const chosen = matchingSlash[suggestionIdx];
         if (chosen) {
@@ -946,6 +1171,11 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
 
     if (key.backspace || key.delete) {
+      if (editingQueueIdx !== null && inputText.length <= 1) {
+        setInputText('');
+        setConfirmDeleteQueueIdx(editingQueueIdx);
+        return;
+      }
       setInputText((prev) => prev.slice(0, -1));
       setSuggestionIdx(0);
       return;
@@ -987,7 +1217,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Text>
         </Box>
         <Text color="gray">
-          (Puedes desactivar esta advertencia inicial en /settings → Advertencia --DAA al inicio: OFF)
+          (Puedes desactivar esta advertencia inicial en /ajustes → Advertencia --DAA al inicio: OFF)
         </Text>
       </Box>
     );
@@ -996,7 +1226,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const artWidth = GLITCH_ASCII_LINES[0]?.length ?? 80;
   const artPad = ' '.repeat(Math.max(0, Math.floor((columns - artWidth) / 2)));
 
-  // Calcula numeración Mensaje N > y Respuesta N >
   let userTurnCounter = 0;
   let modelTurnCounter = 0;
   const numberedMessages = messages.map((m) => {
@@ -1018,6 +1247,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       : settings.permissionMode === 'ask_insecure'
         ? 'yellow'
         : 'cyan';
+
+  const msgPrefixLabel = lang === 'en' ? 'Message' : 'Mensaje';
+  const replyPrefixLabel = lang === 'en' ? 'Reply' : 'Respuesta';
 
   return (
     <Box
@@ -1056,13 +1288,13 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           )}
         </Box>
 
-        {/* Historial numerado: Mensaje N > y Respuesta N > */}
+        {/* Historial numerado: Mensaje 1 (10/25/2026 8:41 PM) > ... y Respuesta 1 · 12s > ... */}
         {numberedMessages.map((m) => (
           <Box key={m.id} flexDirection="column" marginBottom={1}>
             {m.role === 'user' && (
               <Box>
                 <Text color="cyan" bold>
-                  {`Mensaje ${m.turnNumber} > `}
+                  {`${msgPrefixLabel} ${m.turnNumber}${m.timestamp ? ` (${m.timestamp})` : ''} > `}
                 </Text>
                 <Text color="white" bold>
                   {m.text}
@@ -1085,7 +1317,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
                 )}
                 <Box>
                   <Text color="green" bold>
-                    {`Respuesta ${m.turnNumber} > `}
+                    {`${replyPrefixLabel} ${m.turnNumber}${m.durationText ? ` · ${m.durationText}` : ''} > `}
                   </Text>
                   <Text color="white">{m.text}</Text>
                 </Box>
@@ -1099,11 +1331,13 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         ))}
 
-        {/* Respuesta en vivo numerada (Streaming) */}
+        {/* Respuesta en vivo numerada (Streaming): Pensando... ("ESC" para cancelar, 1h 30m) */}
         {isStreaming && (
           <Box flexDirection="column" marginBottom={1}>
-            <Text color="cyan">
-              ⚡ Generando Respuesta {nextStreamingReplyNumber}... (envía más mensajes a la fila o usa /effort y Shift+Tab)
+            <Text color="cyan" bold>
+              {lang === 'en'
+                ? `Thinking... ("ESC" to cancel, ${formatElapsedDuration(streamingElapsedMs)})`
+                : `Pensando... ("ESC" para cancelar, ${formatElapsedDuration(streamingElapsedMs)})`}
             </Text>
             {liveThought && settings.thoughts && (
               <Box borderStyle="single" borderColor="gray" paddingX={1}>
@@ -1115,11 +1349,98 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             {liveText && (
               <Box>
                 <Text color="green" bold>
-                  {`Respuesta ${nextStreamingReplyNumber} > `}
+                  {`${replyPrefixLabel} ${nextStreamingReplyNumber} · ${formatElapsedDuration(streamingElapsedMs)} > `}
                 </Text>
                 <Text color="white">{liveText}</Text>
               </Box>
             )}
+          </Box>
+        )}
+
+        {/* Panel de Agentes y Chats en tiempo real + Historial (abierto con la flecha ← en chat vacío) */}
+        {activeDialog === 'agents_chats' && (
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="cyan"
+            paddingX={2}
+            paddingY={1}
+            marginBottom={1}
+          >
+            <Box
+              flexDirection="row"
+              justifyContent="space-between"
+              marginBottom={1}
+            >
+              <Text bold color="cyan">
+                {lang === 'en'
+                  ? '◄ Live Agents, Active Chats & History'
+                  : '◄ Agentes y Chats en Tiempo Real + Historial'}
+              </Text>
+              <Text color="gray">
+                {lang === 'en'
+                  ? '↑/↓ select · Enter open · → or Esc back'
+                  : '↑/↓ elegir · Enter abrir · → o Esc volver'}
+              </Text>
+            </Box>
+
+            <Text bold color="green">
+              {lang === 'en'
+                ? 'Active Agent / Current Session (Real-Time):'
+                : 'Agente / Sesión Activa en Tiempo Real:'}
+            </Text>
+            <Text color={dialogCursor === 0 ? 'cyan' : 'white'} bold={dialogCursor === 0}>
+              {dialogCursor === 0 ? '❯ ' : '  '}
+              {isStreaming
+                ? lang === 'en'
+                  ? '🟢 [RUNNING]'
+                  : '🟢 [PENSANDO EN VIVO]'
+                : lang === 'en'
+                  ? '🟢 [ACTIVE]'
+                  : '🟢 [ACTIVO]'}{' '}
+              {deriveSessionTitle(messages, sessionRef.current.history).padEnd(
+                36,
+                ' ',
+              )}{' '}
+              | {settings.model} ({settings.effort.toUpperCase()}) |{' '}
+              {formatSubModeLabel(settings.subMode, lang)} |{' '}
+              {sessionRef.current.history.length}{' '}
+              {lang === 'en' ? 'turns' : 'turnos'}
+            </Text>
+
+            <Box marginTop={1} flexDirection="column">
+              <Text bold color="yellow">
+                {lang === 'en'
+                  ? `Chat History (${savedSessionsList.length}):`
+                  : `Historial de Chats Guardados (${savedSessionsList.length}):`}
+              </Text>
+              {savedSessionsList.length === 0 ? (
+                <Text color="gray">
+                  {lang === 'en'
+                    ? '  (No saved conversations yet)'
+                    : '  (Aún no hay conversaciones anteriores guardadas)'}
+                </Text>
+              ) : (
+                savedSessionsList.map((s, idx) => {
+                  const rowIndex = idx + 1;
+                  const isSelected = dialogCursor === rowIndex;
+                  const isCurrentId = s.id === sessionId;
+                  return (
+                    <Text
+                      key={s.id}
+                      color={isSelected ? 'cyan' : 'white'}
+                      bold={isSelected}
+                    >
+                      {isSelected ? '❯ ' : '  '}
+                      {s.title.padEnd(42, ' ')} | {s.model.padEnd(24, ' ')} |{' '}
+                      {s.updatedAt} ({s.history.length}{' '}
+                      {lang === 'en' ? 'turns' : 'turnos'})
+                      {isCurrentId ? ' (actual)' : ''}
+                    </Text>
+                  );
+                })
+              )}
+            </Box>
           </Box>
         )}
 
@@ -1342,7 +1663,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
-        {/* Diálogo interactivo /settings */}
+        {/* Diálogo interactivo /settings (/ajustes) con opción de Idioma Español/English */}
         {activeDialog === 'settings' && (
           <Box
             flexDirection="column"
@@ -1353,20 +1674,23 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             marginBottom={1}
           >
             <Text bold color="cyan">
-              Panel de Preferencias (/settings) — ↑/↓ seleccionar, Enter/←/→ cambiar, Esc cerrar
+              {lang === 'en'
+                ? 'Preferences Panel (/settings) — ↑/↓ select, Enter/←/→ change, Esc close'
+                : 'Panel de Preferencias (/ajustes) — ↑/↓ seleccionar, Enter/←/→ cambiar, Esc cerrar'}
             </Text>
             <Text color={dialogCursor === 0 ? 'cyan' : 'white'}>
-              {dialogCursor === 0 ? '❯ ' : '  '}Modo de permisos            :{' '}
+              {dialogCursor === 0 ? '❯ ' : '  '}
+              {lang === 'en' ? 'Permission Mode             : ' : 'Modo de permisos            : '}
               {formatPermissionModeLabel(settings.permissionMode)}
             </Text>
             <Text color={dialogCursor === 1 ? 'cyan' : 'white'}>
-              {dialogCursor === 1 ? '❯ ' : '  '}Sub-Modo                    :{' '}
-              {settings.subMode === 'plan'
-                ? 'Plan (solo planear)'
-                : 'Agent (modificar)'}
+              {dialogCursor === 1 ? '❯ ' : '  '}
+              {lang === 'en' ? 'Sub-Mode                    : ' : 'Sub-Modo                    : '}
+              {formatSubModeLabel(settings.subMode, lang)}
             </Text>
             <Text color={dialogCursor === 2 ? 'cyan' : 'white'}>
-              {dialogCursor === 2 ? '❯ ' : '  '}Esfuerzo por defecto        :{' '}
+              {dialogCursor === 2 ? '❯ ' : '  '}
+              {lang === 'en' ? 'Default Effort              : ' : 'Esfuerzo por defecto        : '}
               {settings.effort.toUpperCase()}
             </Text>
             <Text color={dialogCursor === 3 ? 'cyan' : 'white'}>
@@ -1374,14 +1698,20 @@ export const TuiApp: React.FC<TuiAppProps> = ({
               {settings.thoughts ? 'ON' : 'OFF'}
             </Text>
             <Text color={dialogCursor === 4 ? 'cyan' : 'white'}>
-              {dialogCursor === 4 ? '❯ ' : '  '}Advertencia --DAA al inicio :{' '}
+              {dialogCursor === 4 ? '❯ ' : '  '}
+              {lang === 'en' ? '--DAA Startup Warning       : ' : 'Advertencia --DAA al inicio : '}
               {settings.hideDaaWarning ? 'OFF' : 'ON'}
+            </Text>
+            <Text color={dialogCursor === 5 ? 'cyan' : 'white'}>
+              {dialogCursor === 5 ? '❯ ' : '  '}
+              {lang === 'en' ? 'Language / Idioma           : ' : 'Idioma / Language           : '}
+              {lang === 'en' ? 'English' : 'Español'}
             </Text>
           </Box>
         )}
       </Box>
 
-      {/* ZONA INFERIOR ANCLADA ABAJO: Panel ? + Cola + Menú Slash + Barra sobre el Chat + Caja de Chat + Pie */}
+      {/* ZONA INFERIOR ANCLADA ABAJO */}
       <Box flexDirection="column">
         {showShortcutsPanel && activeDialog === 'none' && (
           <Box
@@ -1393,31 +1723,64 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             marginBottom={1}
           >
             <Text bold color="cyan">
-              Atajos y Comandos Rápidos (presiona ? de nuevo para ocultar)
+              {lang === 'en'
+                ? 'Quick Shortcuts & Commands (press ? again to hide)'
+                : 'Atajos y Comandos Rápidos (presiona ? de nuevo para ocultar)'}
+            </Text>
+            {SLASH_COMMANDS.map((sc) => (
+              <Text key={sc.cmd} color="white">
+                {`  ${sc.displayCmd[lang].padEnd(24, ' ')} ${sc.desc[lang]}`}
+              </Text>
+            ))}
+            <Text color="white">
+              {lang === 'en'
+                ? '  ← (Left Arrow)            Open Live Agents, Active Chats & History'
+                : '  ← (Flecha izquierda)      Abrir Agentes y Chats en tiempo real + Historial'}
             </Text>
             <Text color="white">
-              {'  /new                      Iniciar conversación limpia'}
+              {lang === 'en'
+                ? '  Shift+Tab / Alt+P         Toggle Sub-Mode Plan <-> Agent live'
+                : '  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agente en vivo'}
             </Text>
             <Text color="white">
-              {'  /resume                   Retomar una conversación anterior guardada'}
-            </Text>
-            <Text color="white">
-              {'  /model [id] [effort]      Seleccionar modelo y esfuerzo (ej. /model gemini-4-argon high)'}
-            </Text>
-            <Text color="white">
-              {'  /effort [low|medium|high] Cambiar esfuerzo en vivo sin reiniciar'}
-            </Text>
-            <Text color="white">
-              {'  /settings                 Panel de Modo, Sub-Modo, Esfuerzo, Thoughts y Aviso --DAA'}
-            </Text>
-            <Text color="white">
-              {'  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agent en vivo'}
-            </Text>
-            <Text color="white">
-              {'  ↑ / ↓ con cola activa     Subir/bajar en la fila (Queue) y Enter para editar en esa posición'}
+              {lang === 'en'
+                ? '  Ctrl+C (x2)               Press twice to confirm and exit Glitch CLI'
+                : '  Ctrl+C (x2)               Presionar dos veces para confirmar y salir'}
             </Text>
             <Text color="gray">
               {'  Flags CLI: glitch --DAA | glitch --dangerously-always-allow | glitch --model <id> | glitch -m "<id>"'}
+            </Text>
+          </Box>
+        )}
+
+        {/* TUI de confirmación al borrar completamente un elemento de la fila de espera */}
+        {confirmDeleteQueueIdx !== null && (
+          <Box
+            borderStyle="round"
+            borderColor="red"
+            paddingX={2}
+            marginBottom={0}
+          >
+            <Text color="red" bold>
+              {lang === 'en'
+                ? `⚠ Delete queued prompt at position #${confirmDeleteQueueIdx + 1}? [Enter / Y = Yes, delete · Esc / N = Cancel]`
+                : `⚠ ¿Borrar posición #${confirmDeleteQueueIdx + 1} de la fila de espera? [Enter / S = Sí, borrar · Esc / N = Cancelar]`}
+            </Text>
+          </Box>
+        )}
+
+        {/* Aviso de doble Ctrl+C para salir */}
+        {ctrlCPending && (
+          <Box
+            borderStyle="round"
+            borderColor="yellow"
+            paddingX={2}
+            marginBottom={0}
+          >
+            <Text color="yellow" bold>
+              {lang === 'en'
+                ? '⚠ Press Ctrl + C again to confirm and exit Glitch CLI.'
+                : '⚠ Presiona Ctrl + C otra vez para confirmar y salir de Glitch CLI.'}
             </Text>
           </Box>
         )}
@@ -1430,7 +1793,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             paddingX={1}
           >
             <Text color="yellow" bold>
-              ⏳ En fila de espera ({queuedPrompts.length}) — usa ↑/↓ para elegir y Enter para editar en su misma posición:
+              {lang === 'en'
+                ? `⏳ Queued (${queuedPrompts.length}) — use ↑/↓ to select, Enter to edit in place, or clear text to delete:`
+                : `⏳ En fila de espera (${queuedPrompts.length}) — usa ↑/↓ para elegir, Enter para editar en su posición o borra el texto para eliminar:`}
             </Text>
             {queuedPrompts.map((qp, idx) => {
               const isEditingThis = editingQueueIdx === idx;
@@ -1441,7 +1806,11 @@ export const TuiApp: React.FC<TuiAppProps> = ({
                   bold={isEditingThis}
                 >
                   {isEditingThis ? '✎ ' : '  '}#{idx + 1}: {qp}
-                  {isEditingThis ? ' (editando en esta posición)' : ''}
+                  {isEditingThis
+                    ? lang === 'en'
+                      ? ' (editing this position)'
+                      : ' (editando en esta posición)'
+                    : ''}
                 </Text>
               );
             })}
@@ -1459,9 +1828,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
               <Box key={item.cmd} flexDirection="row">
                 <Text color={idx === suggestionIdx ? 'cyan' : 'white'} bold>
                   {idx === suggestionIdx ? '❯ ' : '  '}
-                  {item.cmd.padEnd(12, ' ')}
+                  {item.displayCmd[lang].padEnd(14, ' ')}
                 </Text>
-                <Text color="gray">{item.desc}</Text>
+                <Text color="gray">{item.desc[lang]}</Text>
               </Box>
             ))}
           </Box>
@@ -1482,6 +1851,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
                 sessionRef.current.history,
                 envCounts.mcpCount,
                 envCounts.skillCount,
+                lang,
               )}
             </Text>
           </Box>
@@ -1496,27 +1866,33 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           >
             <Text color={editingQueueIdx !== null ? 'yellow' : 'cyan'} bold>
               {editingQueueIdx !== null
-                ? `[Editando Cola #${editingQueueIdx + 1}] › `
-                : `Mensaje ${userTurnCounter + 1} > `}
+                ? `[${lang === 'en' ? 'Queue' : 'Cola'} #${editingQueueIdx + 1}] › `
+                : `${msgPrefixLabel} ${userTurnCounter + 1} > `}
             </Text>
             {inputText.length > 0 ? (
               <Text color="white">{inputText}█</Text>
             ) : (
               <Text color="gray">
-                Pide a Glitch CLI lo que quieras o escribe / para comandos...
+                {lang === 'en'
+                  ? 'Ask Glitch CLI anything or type / for commands (← for chats)...'
+                  : 'Pide a Glitch CLI lo que quieras o escribe / para comandos (← para chats)...'}
               </Text>
             )}
           </Box>
         )}
 
-        {/* Barra inferior: ? para atajos a la izquierda | Modelo y Esfuerzo a la derecha */}
+        {/* Barra inferior: ? para atajos y ← para chats a la izquierda | Modelo y Esfuerzo a la derecha */}
         <Box
           flexDirection="row"
           justifyContent="space-between"
           paddingX={1}
           marginTop={0}
         >
-          <Text color="gray">? para atajos</Text>
+          <Text color="gray">
+            {lang === 'en'
+              ? '? for shortcuts · ← chats & agents · Ctrl+C (x2) exit'
+              : '? para atajos · ← chats y agentes · Ctrl+C (x2) salir'}
+          </Text>
           <Text color="cyan">{formatStatusBar(settings)}</Text>
         </Box>
       </Box>

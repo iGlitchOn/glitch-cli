@@ -8,6 +8,7 @@ export type CustomEndpointFormat = 'chat_completions' | 'responses';
 export type EffortLevel = 'low' | 'medium' | 'high';
 export type PermissionMode = 'always_allow' | 'ask_insecure' | 'always_ask';
 export type SubMode = 'plan' | 'agent';
+export type AppLanguage = 'es' | 'en';
 
 export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
   always_allow: 'Always Allow',
@@ -17,6 +18,14 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
 
 export function formatPermissionModeLabel(mode: PermissionMode): string {
   return PERMISSION_MODE_LABELS[mode] ?? 'Always Allow';
+}
+
+export function formatSubModeLabel(
+  subMode: SubMode,
+  lang: AppLanguage = 'es',
+): string {
+  if (subMode === 'plan') return 'Plan';
+  return lang === 'es' ? 'Agente' : 'Agent';
 }
 
 export interface VertexConfig {
@@ -40,6 +49,7 @@ export interface GlitchSettings {
   permissionMode: PermissionMode;
   subMode: SubMode;
   hideDaaWarning?: boolean;
+  language?: AppLanguage;
 }
 
 export const DEFAULT_SETTINGS: GlitchSettings = {
@@ -49,6 +59,7 @@ export const DEFAULT_SETTINGS: GlitchSettings = {
   permissionMode: 'always_allow',
   subMode: 'agent',
   hideDaaWarning: false,
+  language: 'es',
 };
 
 export function hasAlwaysAllowFlag(argv: readonly string[]): boolean {

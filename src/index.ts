@@ -31,6 +31,7 @@ export async function main(
       version: '0.1.0',
       launchedWithDaaFlag,
     }),
+    { exitOnCtrlC: false },
   );
   await instance.waitUntilExit();
 }

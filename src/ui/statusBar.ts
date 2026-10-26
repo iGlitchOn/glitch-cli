@@ -5,17 +5,13 @@ import type { Content } from '@google/genai';
 import { getModelDefinition } from '../config/models.js';
 import {
   formatPermissionModeLabel,
+  formatSubModeLabel,
   type GlitchSettings,
-  type SubMode,
 } from '../config/settings.js';
-
-const SUBMODE_LABELS: Record<SubMode, string> = {
-  plan: 'Plan',
-  agent: 'Agent',
-};
 
 export function formatStatusBar(settings: GlitchSettings): string {
   const provider = settings.provider ?? 'vertex';
+  const lang = settings.language ?? 'es';
   const def = getModelDefinition(settings.model, provider);
   const effortLabel =
     def.supportedEfforts.length > 0
@@ -25,13 +21,18 @@ export function formatStatusBar(settings: GlitchSettings): string {
         ).toUpperCase()
       : 'N/A';
 
+  if (lang === 'en') {
+    return `Model: ${def.name} | Effort: ${effortLabel}`;
+  }
   return `Modelo: ${def.name} | Esfuerzo: ${effortLabel}`;
 }
 
 export function formatInputTopLeftMode(settings: GlitchSettings): string {
+  const lang = settings.language ?? 'es';
   const modeLabel = formatPermissionModeLabel(settings.permissionMode);
-  const subModeLabel = SUBMODE_LABELS[settings.subMode];
-  return `${modeLabel} · Sub-Modo: ${subModeLabel} (Shift+Tab)`;
+  const subModeLabel = formatSubModeLabel(settings.subMode, lang);
+  const subTitle = lang === 'en' ? 'Sub-Mode' : 'Sub-Modo';
+  return `${modeLabel} · ${subTitle}: ${subModeLabel} (Shift+Tab)`;
 }
 
 export function calculateRemainingContextPercent(
@@ -62,7 +63,6 @@ export function detectEnvironmentCounts(customHomeDir?: string): {
   let mcpCount = 0;
   let skillCount = 0;
 
-  // Cuenta skills instaladas en ~/.agents/skills si existen
   const skillsDir = path.join(home, '.agents', 'skills');
   if (fs.existsSync(skillsDir)) {
     try {
@@ -74,7 +74,6 @@ export function detectEnvironmentCounts(customHomeDir?: string): {
     }
   }
 
-  // Cuenta MCP servers configurados en ~/.glitch/settings.json si existen
   const settingsPath = path.join(home, '.glitch', 'settings.json');
   if (fs.existsSync(settingsPath)) {
     try {
@@ -98,7 +97,11 @@ export function formatInputTopRightInfo(
   history: readonly Content[],
   mcpCount = 0,
   skillCount = 0,
+  lang: 'es' | 'en' = 'es',
 ): string {
   const pct = calculateRemainingContextPercent(history);
+  if (lang === 'en') {
+    return `${pct}% context left · ${mcpCount} active MCPs · ${skillCount} skills`;
+  }
   return `${pct}% contexto restante · ${mcpCount} MCP activos · ${skillCount} skills`;
 }

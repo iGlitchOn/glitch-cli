@@ -8,6 +8,8 @@ export interface SavedUiMessage {
   role: 'user' | 'model' | 'system';
   text: string;
   thoughtText?: string;
+  timestamp?: string;
+  durationText?: string;
 }
 
 export interface SavedSession {
@@ -47,7 +49,10 @@ export function saveSessionToDisk(
   session: SavedSession,
   customHomeDir?: string,
 ): void {
-  if (session.history.length === 0 && session.messages.every((m) => m.role === 'system')) {
+  if (
+    session.history.length === 0 &&
+    session.messages.every((m) => m.role === 'system')
+  ) {
     return;
   }
   const dir = getSessionsDir(customHomeDir);

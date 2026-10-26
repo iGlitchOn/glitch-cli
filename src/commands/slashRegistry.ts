@@ -1,49 +1,101 @@
+import type { AppLanguage } from '../config/settings.js';
+
 export interface SlashCommandEntry {
+  /** Comando canónico interno */
   cmd: string;
+  /** Comando mostrado según el idioma ('es' -> /esfuerzo, 'en' -> /effort) */
+  displayCmd: Record<AppLanguage, string>;
   aliases: readonly string[];
-  desc: string;
+  desc: Record<AppLanguage, string>;
 }
 
 export const SLASH_COMMANDS: readonly SlashCommandEntry[] = [
   {
     cmd: '/new',
-    aliases: ['clear', 'cls', 'clean', 'reset', 'limpiar', 'nuevo'],
-    desc: 'Iniciar conversación limpia',
+    displayCmd: { es: '/nuevo', en: '/new' },
+    aliases: ['new', 'nuevo', 'clear', 'cls', 'clean', 'reset', 'limpiar'],
+    desc: {
+      es: 'Iniciar conversación limpia',
+      en: 'Start a clean conversation',
+    },
   },
   {
     cmd: '/resume',
-    aliases: ['continue', 'history', 'sessions', 'load', 'retomar', 'historial'],
-    desc: 'Retomar una conversación anterior guardada',
+    displayCmd: { es: '/retomar', en: '/resume' },
+    aliases: [
+      'resume',
+      'retomar',
+      'continue',
+      'history',
+      'sessions',
+      'load',
+      'historial',
+    ],
+    desc: {
+      es: 'Retomar una conversación anterior guardada',
+      en: 'Resume a previously saved conversation',
+    },
   },
   {
     cmd: '/model',
-    aliases: ['models', 'm', 'modelo', 'modelos'],
-    desc: 'Seleccionar modelo y esfuerzo (ej. /model gemini-4-argon high)',
+    displayCmd: { es: '/modelo', en: '/model' },
+    aliases: ['model', 'models', 'm', 'modelo', 'modelos'],
+    desc: {
+      es: 'Seleccionar modelo y esfuerzo (ej. /modelo gemini-4-argon high)',
+      en: 'Select model and effort (e.g. /model gemini-4-argon high)',
+    },
   },
   {
     cmd: '/effort',
-    aliases: ['thinking', 'esfuerzo', 'think', 'level'],
-    desc: 'Ver o cambiar nivel de esfuerzo en vivo (low | medium | high)',
+    displayCmd: { es: '/esfuerzo', en: '/effort' },
+    aliases: ['effort', 'esfuerzo', 'thinking', 'think', 'level'],
+    desc: {
+      es: 'Ver o cambiar nivel de esfuerzo en vivo (low | medium | high)',
+      en: 'View or change live effort level (low | medium | high)',
+    },
   },
   {
     cmd: '/settings',
-    aliases: ['config', 'preferences', 'ajustes', 'opciones', 'cfg'],
-    desc: 'Preferencias (Modo, Sub-Modo Plan/Agent, Esfuerzo, Thoughts, Aviso --DAA)',
+    displayCmd: { es: '/ajustes', en: '/settings' },
+    aliases: [
+      'settings',
+      'ajustes',
+      'config',
+      'preferences',
+      'opciones',
+      'cfg',
+    ],
+    desc: {
+      es: 'Preferencias (Modo, Sub-Modo Plan/Agente, Esfuerzo, Idioma)',
+      en: 'Preferences (Mode, Sub-Mode Plan/Agent, Effort, Language)',
+    },
   },
   {
     cmd: '/auth',
-    aliases: ['login', 'connect', 'vertex', 'api', 'conexion'],
-    desc: 'Configurar conexión (Vertex AI o API personalizada)',
+    displayCmd: { es: '/auth', en: '/auth' },
+    aliases: ['auth', 'login', 'connect', 'vertex', 'api', 'conexion'],
+    desc: {
+      es: 'Configurar conexión (Vertex AI o API personalizada)',
+      en: 'Configure connection (Vertex AI or Custom API)',
+    },
   },
   {
     cmd: '/help',
-    aliases: ['shortcuts', 'commands', 'ayuda', 'atajos', 'h'],
-    desc: 'Mostrar comandos, flags (-m, --model, --DAA) y atajos',
+    displayCmd: { es: '/ayuda', en: '/help' },
+    aliases: ['help', 'ayuda', 'shortcuts', 'commands', 'atajos', 'h'],
+    desc: {
+      es: 'Mostrar comandos, flags (-m, --model, --DAA) y atajos',
+      en: 'Show commands, CLI flags (-m, --model, --DAA), and shortcuts',
+    },
   },
   {
     cmd: '/exit',
-    aliases: ['quit', 'q', 'bye', 'salir', 'close'],
-    desc: 'Salir de Glitch CLI',
+    displayCmd: { es: '/salir', en: '/exit' },
+    aliases: ['exit', 'salir', 'quit', 'q', 'bye', 'close'],
+    desc: {
+      es: 'Salir de Glitch CLI',
+      en: 'Exit Glitch CLI',
+    },
   },
 ];
 
@@ -61,8 +113,9 @@ export function matchSlashCommands(rawInput: string): SlashCommandEntry[] {
   const aliasMatches: SlashCommandEntry[] = [];
 
   for (const item of SLASH_COMMANDS) {
-    const cmdName = item.cmd.slice(1).toLowerCase();
-    if (cmdName.startsWith(query)) {
+    const cmdEn = item.displayCmd.en.slice(1).toLowerCase();
+    const cmdEs = item.displayCmd.es.slice(1).toLowerCase();
+    if (cmdEn.startsWith(query) || cmdEs.startsWith(query)) {
       directMatches.push(item);
     } else if (
       item.aliases.some((alias) => alias.toLowerCase().startsWith(query))

@@ -4,6 +4,10 @@ import {
   VERTEX_CONTINUE_PROMPT,
   normalizeHistoryForVertex,
 } from '../core/history.js';
+import {
+  formatCleanApiError,
+  formatElapsedDuration,
+} from '../core/errorFormat.js';
 import { withRetryBackoff } from '../core/retry.js';
 import {
   CustomProviderAdapter,
@@ -228,5 +232,20 @@ describe('Etapa 4: Proveedor personalizado, historial anti-400 de Vertex y reint
         // no-op
       }
     }).rejects.toThrow('sk-****9876');
+  });
+
+  it('resume errores JSON anidados de Vertex a "Code: 429 Message: ..." y formatea duraciones de thinking ("1h 30m")', () => {
+    const rawVertexJsonError = new Error(
+      '{"error":{"message":"{\\"error\\":{\\"code\\":429,\\"message\\":\\"Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.\\",\\"status\\":\\"RESOURCE_EXHAUSTED\\"}}","code":429,"status":"Too Many Requests"}}',
+    );
+    const cleaned = formatCleanApiError(rawVertexJsonError);
+    expect(cleaned).toBe(
+      'Code: 429 Message: Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.',
+    );
+    expect(cleaned).not.toContain('{"error"');
+
+    expect(formatElapsedDuration(90 * 60 * 1000)).toBe('1h 30m');
+    expect(formatElapsedDuration(75 * 1000)).toBe('1m 15s');
+    expect(formatElapsedDuration(8 * 1000)).toBe('8s');
   });
 });

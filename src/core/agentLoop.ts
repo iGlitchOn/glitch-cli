@@ -4,6 +4,7 @@ import type {
   ProviderAdapter,
   ProviderRequestOptions,
 } from '../providers/types.js';
+import { formatCleanApiError } from './errorFormat.js';
 import type { SessionState } from './session.js';
 
 export interface AgentTaskStepHook {
@@ -32,10 +33,6 @@ export class AgentLoop {
     return this.queue;
   }
 
-  /**
-   * Actualiza un prompt en la cola en su misma posición sin alterar el resto de la fila.
-   * Por ejemplo, si hay 3 elementos en cola [0, 1, 2], subir 2 veces apunta al índice 1 (el 2do prompt).
-   */
   updateQueuedPromptAt(index: number, newText: string): boolean {
     const trimmed = newText.trim();
     if (!trimmed || index < 0 || index >= this.queue.length) {
@@ -45,9 +42,14 @@ export class AgentLoop {
     return true;
   }
 
-  /**
-   * Obtiene el índice en la cola al presionar la flecha ↑ `stepsUp` veces (1 = último encolado, 2 = penúltimo, etc.).
-   */
+  removeQueuedPromptAt(index: number): boolean {
+    if (index < 0 || index >= this.queue.length) {
+      return false;
+    }
+    this.queue.splice(index, 1);
+    return true;
+  }
+
   getQueueIndexFromStepsUp(stepsUp: number): number {
     if (stepsUp <= 0 || this.queue.length === 0) {
       return -1;
@@ -88,7 +90,6 @@ export class AgentLoop {
       let keepGoing = true;
 
       while (keepGoing) {
-        // Lee effort, modo, sub-modo y thoughts en vivo antes de CADA llamada al modelo
         const live = this.session.getLiveCallConfig();
         const requestOptions: ProviderRequestOptions = {
           model: live.model,
@@ -135,8 +136,7 @@ export class AgentLoop {
         }
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.onError(`✗ Error en llamada al modelo: ${msg}`);
+      this.onError(formatCleanApiError(err));
     } finally {
       this.session.isRequestActive = false;
     }

@@ -184,11 +184,25 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     const bar = formatStatusBar(baseSettings);
     expect(bar).toBe('Modelo: Gemini 4 Argon | Esfuerzo: MEDIUM');
 
-    const topLeft = formatInputTopLeftMode({
+    const topLeftPlan = formatInputTopLeftMode({
       ...baseSettings,
       subMode: 'plan',
     });
-    expect(topLeft).toBe('Always Allow · Sub-Modo: Plan (Shift+Tab)');
+    expect(topLeftPlan).toBe('Always Allow · Sub-Modo: Plan (Shift+Tab)');
+
+    const topLeftAgente = formatInputTopLeftMode({
+      ...baseSettings,
+      subMode: 'agent',
+      language: 'es',
+    });
+    expect(topLeftAgente).toBe('Always Allow · Sub-Modo: Agente (Shift+Tab)');
+
+    const topLeftEn = formatInputTopLeftMode({
+      ...baseSettings,
+      subMode: 'agent',
+      language: 'en',
+    });
+    expect(topLeftEn).toBe('Always Allow · Sub-Mode: Agent (Shift+Tab)');
 
     const topRight = formatInputTopRightInfo([], 3, 73);
     expect(topRight).toBe('100% contexto restante · 3 MCP activos · 73 skills');

@@ -208,6 +208,13 @@ describe('Etapa 5: Slash commands en vivo con AgentLoop separado del InputLoop',
       'Prompt en cola 3',
     ]);
 
+    // Verifica también que se puede borrar una posición de la fila (ej. posición #3 -> índice 2)
+    expect(agentLoop.removeQueuedPromptAt(2)).toBe(true);
+    expect(agentLoop.getQueuedPrompts()).toEqual([
+      'Prompt en cola 1',
+      'Prompt en cola 2 (EDITADO)',
+    ]);
+
     allowFirstCallToFinish();
     await activePromise;
 
@@ -215,17 +222,18 @@ describe('Etapa 5: Slash commands en vivo con AgentLoop separado del InputLoop',
       'Tarea inicial corriendo',
       'Prompt en cola 1',
       'Prompt en cola 2 (EDITADO)',
-      'Prompt en cola 3',
     ]);
   });
 
-  it('mapea alternativas (/cl, /clear -> /new y /continue -> /resume) y ejecuta /new y /resume correctamente', async () => {
-    // Al buscar /cl o /clear aparece el comando original /new
+  it('mapea alternativas y comandos en español/inglés (/esfuerzo -> /effort, /ajustes -> /settings, /cl, /clear -> /new) y ejecuta /new y /resume correctamente', async () => {
     const matchesCl = matchSlashCommands('/cl');
     expect(matchesCl[0]?.cmd).toBe('/new');
     const matchesClear = matchSlashCommands('/clear');
     expect(matchesClear[0]?.cmd).toBe('/new');
     expect(resolveSlashCommandAlias('/clear')).toBe('/new');
+    expect(resolveSlashCommandAlias('/nuevo')).toBe('/new');
+    expect(resolveSlashCommandAlias('/esfuerzo high')).toBe('/effort high');
+    expect(resolveSlashCommandAlias('/ajustes')).toBe('/settings');
     expect(resolveSlashCommandAlias('/continue 1')).toBe('/resume 1');
 
     const session = new SessionState({ ...DEFAULT_SETTINGS });
