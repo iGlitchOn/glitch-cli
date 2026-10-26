@@ -35,6 +35,49 @@ export function formatInputTopLeftMode(settings: GlitchSettings): string {
   return `${modeLabel} · ${subTitle}: ${subModeLabel} (Shift+Tab)`;
 }
 
+/**
+ * Estima el costo en USD de un turno a partir de los caracteres de entrada y salida
+ * (~4 caracteres por token; tarifas de referencia Gemini Pro/Argon: $1.25 / 1M input, $10.00 / 1M output+thought).
+ */
+export function estimateTurnCostUsd(
+  inputChars: number,
+  outputChars: number,
+  thoughtChars = 0,
+): number {
+  const inputTokens = Math.ceil(Math.max(0, inputChars) / 4);
+  const outputTokens = Math.ceil(Math.max(0, outputChars + thoughtChars) / 4);
+  const inputCost = (inputTokens / 1_000_000) * 1.25;
+  const outputCost = (outputTokens / 1_000_000) * 10.0;
+  return inputCost + outputCost;
+}
+
+export function formatUsdAmount(amount: number): string {
+  if (amount <= 0) {
+    return '$0.00';
+  }
+  if (amount < 0.01) {
+    return `$${amount.toFixed(4)}`;
+  }
+  return `$${amount.toFixed(2)}`;
+}
+
+/**
+ * Formatea el resumen de costo de la sesión y del último mensaje al estilo Claude Code:
+ * `$0.27 | last $0.16 · 4s`
+ */
+export function formatSessionCostSummary(
+  totalCostUsd: number,
+  lastCostUsd: number,
+  lastDurationText: string,
+  lang: 'es' | 'en' = 'es',
+): string {
+  const totalStr = formatUsdAmount(totalCostUsd);
+  const lastStr = formatUsdAmount(lastCostUsd);
+  const dur = lastDurationText || '0s';
+  const lastLabel = lang === 'en' ? 'last' : 'último';
+  return `${totalStr} | ${lastLabel} ${lastStr} · ${dur}`;
+}
+
 export function calculateRemainingContextPercent(
   history: readonly Content[],
   maxTokens = 1_000_000,

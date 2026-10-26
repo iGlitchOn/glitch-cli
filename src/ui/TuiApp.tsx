@@ -35,13 +35,15 @@ import {
 import { toggleSubMode } from '../permissions/permissions.js';
 import {
   GLITCH_ASCII_LINES,
-  IGLITCHOFF_WORDMARK,
-  formatShortCwd,
+  GLITCH_MINI_LOGO_LINES,
+  formatClaudeStyleHeaderInfo,
 } from './banner.js';
 import {
   detectEnvironmentCounts,
+  estimateTurnCostUsd,
   formatInputTopLeftMode,
   formatInputTopRightInfo,
+  formatSessionCostSummary,
   formatStatusBar,
 } from './statusBar.js';
 import {
@@ -118,6 +120,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
   const [liveThought, setLiveThought] = useState('');
   const [liveText, setLiveText] = useState('');
+  const [sessionCostUsd, setSessionCostUsd] = useState(0);
+  const [lastTurnCostUsd, setLastTurnCostUsd] = useState(0);
+  const [lastTurnDurationText, setLastTurnDurationText] = useState('0s');
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(() =>
     isAuthConfigured(initialSettings) ? 'none' : 'auth',
   );
@@ -329,6 +334,14 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       }
 
       const elapsed = formatElapsedDuration(Date.now() - startTs);
+      const turnCost = estimateTurnCostUsd(
+        userPrompt.length,
+        accText.length,
+        accThought.length,
+      );
+      setLastTurnCostUsd(turnCost);
+      setLastTurnDurationText(elapsed);
+      setSessionCostUsd((prev) => prev + turnCost);
 
       if (abortController.signal.aborted) {
         const cancelNote =
@@ -1172,6 +1185,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
 
     if (key.backspace || key.delete) {
+      if (showShortcutsPanel) {
+        setShowShortcutsPanel(false);
+      }
       if (editingQueueIdx !== null && inputText.length <= 1) {
         setInputText('');
         setConfirmDeleteQueueIdx(editingQueueIdx);
@@ -1183,6 +1199,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
 
     if (input && !key.ctrl && !key.meta) {
+      if (showShortcutsPanel) {
+        setShowShortcutsPanel(false);
+      }
       setInputText((prev) => prev + input);
       setSuggestionIdx(0);
     }
@@ -1251,6 +1270,8 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
   const msgPrefixLabel = lang === 'en' ? 'Message' : 'Mensaje';
   const replyPrefixLabel = lang === 'en' ? 'Reply' : 'Respuesta';
+  const headerInfo = formatClaudeStyleHeaderInfo(settings, version);
+  const activeAgentCount = 1;
 
   return (
     <Box
@@ -1259,21 +1280,26 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       justifyContent="space-between"
       paddingX={1}
     >
-      {/* ZONA SUPERIOR: Cabecera + Respuestas del Modelo + Diálogos */}
+      {/* ZONA SUPERIOR: Cabecera estilo Claude Code + Respuestas del Modelo + Diálogos */}
       <Box flexDirection="column" flexGrow={1}>
         <Box flexDirection="column" marginBottom={1}>
-          <Box flexDirection="row" justifyContent="space-between">
+          <Box flexDirection="row" alignItems="center">
+            <Box flexDirection="column" marginRight={2}>
+              {GLITCH_MINI_LOGO_LINES.map((logoLine, idx) => (
+                <Text key={idx} color="cyan" bold>
+                  {logoLine}
+                </Text>
+              ))}
+            </Box>
             <Box flexDirection="column">
               <Box>
                 <Text bold color="white">
-                  {'>_ Glitch CLI '}
+                  {headerInfo.line1Title}{' '}
                 </Text>
-                <Text color="gray">(v{version})</Text>
+                <Text color="gray">{headerInfo.line1Version}</Text>
               </Box>
-              <Text color="gray">   {formatShortCwd()}</Text>
-            </Box>
-            <Box>
-              <Text color="cyan">{IGLITCHOFF_WORDMARK}</Text>
+              <Text color="gray">{headerInfo.line2ModelAuth}</Text>
+              <Text color="gray">{headerInfo.line3Cwd}</Text>
             </Box>
           </Box>
 
@@ -1289,7 +1315,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           )}
         </Box>
 
-        {/* Historial numerado: Mensaje 1 (10/25/2026 8:41 PM) > ... y Respuesta 1 · 12s > ... */}
+        {/* Historial numerado: Mensaje 1 (10/25/2026 9:14 PM) > ... y Respuesta 1 (6s) > ... */}
         {numberedMessages.map((m) => (
           <Box key={m.id} flexDirection="column" marginBottom={1}>
             {m.role === 'user' && (
@@ -1318,7 +1344,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
                 )}
                 <Box>
                   <Text color="green" bold>
-                    {`${replyPrefixLabel} ${m.turnNumber}${m.durationText ? ` · ${m.durationText}` : ''} > `}
+                    {`${replyPrefixLabel} ${m.turnNumber}${m.durationText ? ` (${m.durationText})` : ''} > `}
                   </Text>
                   <Text color="white">{m.text}</Text>
                 </Box>
@@ -1332,14 +1358,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         ))}
 
-        {/* Respuesta en vivo numerada (Streaming): Pensando... ("ESC" para cancelar, 1h 30m) */}
-        {isStreaming && (
+        {/* Texto parcial en streaming dentro del área de conversación */}
+        {isStreaming && (liveThought || liveText) && (
           <Box flexDirection="column" marginBottom={1}>
-            <Text color="cyan" bold>
-              {lang === 'en'
-                ? `Thinking... ("ESC" to cancel, ${formatElapsedDuration(streamingElapsedMs)})`
-                : `Pensando... ("ESC" para cancelar, ${formatElapsedDuration(streamingElapsedMs)})`}
-            </Text>
             {liveThought && settings.thoughts && (
               <Box borderStyle="single" borderColor="gray" paddingX={1}>
                 <Text color="gray" italic>
@@ -1350,7 +1371,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             {liveText && (
               <Box>
                 <Text color="green" bold>
-                  {`${replyPrefixLabel} ${nextStreamingReplyNumber} · ${formatElapsedDuration(streamingElapsedMs)} > `}
+                  {`${replyPrefixLabel} ${nextStreamingReplyNumber} (${formatElapsedDuration(streamingElapsedMs)}) > `}
                 </Text>
                 <Text color="white">{liveText}</Text>
               </Box>
@@ -1811,16 +1832,11 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
         {/* Aviso de doble Ctrl+C para salir */}
         {ctrlCPending && (
-          <Box
-            borderStyle="round"
-            borderColor="yellow"
-            paddingX={2}
-            marginBottom={0}
-          >
+          <Box paddingX={1} marginBottom={0}>
             <Text color="yellow" bold>
               {lang === 'en'
-                ? '⚠ Press Ctrl + C again to confirm and exit Glitch CLI.'
-                : '⚠ Presiona Ctrl + C otra vez para confirmar y salir de Glitch CLI.'}
+                ? '⚠ Press again to exit'
+                : '⚠ Presiona otra vez para salir'}
             </Text>
           </Box>
         )}
@@ -1876,6 +1892,34 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
+        {/* Pensando... ("ESC" para cancelar, 6s) y gasto de sesión justo ARRIBA de Always Allow */}
+        {activeDialog === 'none' && (
+          <Box
+            flexDirection="row"
+            justifyContent="space-between"
+            paddingX={1}
+          >
+            <Box>
+              {isStreaming ? (
+                <Text color="cyan" bold>
+                  {lang === 'en'
+                    ? `✻ Thinking... ("ESC" to cancel, ${formatElapsedDuration(streamingElapsedMs)})`
+                    : `✻ Pensando... ("ESC" para cancelar, ${formatElapsedDuration(streamingElapsedMs)})`}
+                </Text>
+              ) : (
+                <Text color="gray">
+                  {`● ${formatSessionCostSummary(sessionCostUsd, lastTurnCostUsd, lastTurnDurationText, lang)}`}
+                </Text>
+              )}
+            </Box>
+            {isStreaming && (
+              <Text color="gray">
+                {`● ${formatSessionCostSummary(sessionCostUsd, lastTurnCostUsd, lastTurnDurationText, lang)}`}
+              </Text>
+            )}
+          </Box>
+        )}
+
         {/* Barra justo arriba del chat: Izquierda (Modo + Sub-Modo) | Derecha (% Contexto · MCP activos · Skills) */}
         {activeDialog === 'none' && (
           <Box
@@ -1914,14 +1958,14 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             ) : (
               <Text color="gray">
                 {lang === 'en'
-                  ? 'Ask Glitch CLI anything or type / for commands (← for chats)...'
-                  : 'Pide a Glitch CLI lo que quieras o escribe / para comandos (← para chats)...'}
+                  ? 'Ask Glitch CLI anything or type / for commands...'
+                  : 'Pide a Glitch CLI lo que quieras o escribe / para comandos...'}
               </Text>
             )}
           </Box>
         )}
 
-        {/* Barra inferior: ? para atajos y ← para chats a la izquierda | Modelo y Esfuerzo a la derecha */}
+        {/* Barra inferior: ? para atajos · ← 1 agent · Salir: Ctrl+C a la izquierda | Modelo y Esfuerzo a la derecha */}
         <Box
           flexDirection="row"
           justifyContent="space-between"
@@ -1930,8 +1974,8 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         >
           <Text color="gray">
             {lang === 'en'
-              ? '? for shortcuts · ← chats & agents · Ctrl+C (x2) exit'
-              : '? para atajos · ← chats y agentes · Ctrl+C (x2) salir'}
+              ? `? for shortcuts · ← ${activeAgentCount} agent · Exit: Ctrl+C`
+              : `? para atajos · ← ${activeAgentCount} agent · Salir: Ctrl+C`}
           </Text>
           <Text color="cyan">{formatStatusBar(settings)}</Text>
         </Box>
