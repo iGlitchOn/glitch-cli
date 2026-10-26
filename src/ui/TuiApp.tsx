@@ -26,6 +26,7 @@ import {
 } from '../config/models.js';
 import { runEffortCommand } from '../commands/effort.js';
 import { parseModelAndEffortArgs } from '../commands/model.js';
+import { getSettingHelpDetail } from '../commands/settings.js';
 import {
   SLASH_COMMANDS,
   matchSlashCommands,
@@ -1663,52 +1664,91 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           </Box>
         )}
 
-        {/* Diálogo interactivo /settings (/ajustes) con opción de Idioma Español/English */}
-        {activeDialog === 'settings' && (
-          <Box
-            flexDirection="column"
-            borderStyle="round"
-            borderColor="cyan"
-            paddingX={2}
-            paddingY={1}
-            marginBottom={1}
-          >
-            <Text bold color="cyan">
-              {lang === 'en'
-                ? 'Preferences Panel (/settings) — ↑/↓ select, Enter/←/→ change, Esc close'
-                : 'Panel de Preferencias (/ajustes) — ↑/↓ seleccionar, Enter/←/→ cambiar, Esc cerrar'}
-            </Text>
-            <Text color={dialogCursor === 0 ? 'cyan' : 'white'}>
-              {dialogCursor === 0 ? '❯ ' : '  '}
-              {lang === 'en' ? 'Permission Mode             : ' : 'Modo de permisos            : '}
-              {formatPermissionModeLabel(settings.permissionMode)}
-            </Text>
-            <Text color={dialogCursor === 1 ? 'cyan' : 'white'}>
-              {dialogCursor === 1 ? '❯ ' : '  '}
-              {lang === 'en' ? 'Sub-Mode                    : ' : 'Sub-Modo                    : '}
-              {formatSubModeLabel(settings.subMode, lang)}
-            </Text>
-            <Text color={dialogCursor === 2 ? 'cyan' : 'white'}>
-              {dialogCursor === 2 ? '❯ ' : '  '}
-              {lang === 'en' ? 'Default Effort              : ' : 'Esfuerzo por defecto        : '}
-              {settings.effort.toUpperCase()}
-            </Text>
-            <Text color={dialogCursor === 3 ? 'cyan' : 'white'}>
-              {dialogCursor === 3 ? '❯ ' : '  '}Thoughts                    :{' '}
-              {settings.thoughts ? 'ON' : 'OFF'}
-            </Text>
-            <Text color={dialogCursor === 4 ? 'cyan' : 'white'}>
-              {dialogCursor === 4 ? '❯ ' : '  '}
-              {lang === 'en' ? '--DAA Startup Warning       : ' : 'Advertencia --DAA al inicio : '}
-              {settings.hideDaaWarning ? 'OFF' : 'ON'}
-            </Text>
-            <Text color={dialogCursor === 5 ? 'cyan' : 'white'}>
-              {dialogCursor === 5 ? '❯ ' : '  '}
-              {lang === 'en' ? 'Language / Idioma           : ' : 'Idioma / Language           : '}
-              {lang === 'en' ? 'English' : 'Español'}
-            </Text>
-          </Box>
-        )}
+        {/* Diálogo interactivo /settings (/ajustes) con segunda TUI explicativa contextual */}
+        {activeDialog === 'settings' && (() => {
+          const detail = getSettingHelpDetail(dialogCursor, lang);
+          return (
+            <Box flexDirection="column" marginBottom={1}>
+              <Box
+                flexDirection="column"
+                borderStyle="round"
+                borderColor="cyan"
+                paddingX={2}
+                paddingY={1}
+              >
+                <Text bold color="cyan">
+                  {lang === 'en'
+                    ? 'Preferences Panel (/settings) — ↑/↓ select, Enter/←/→ change, Esc close'
+                    : 'Panel de Preferencias (/ajustes) — ↑/↓ seleccionar, Enter/←/→ cambiar, Esc cerrar'}
+                </Text>
+                <Text color={dialogCursor === 0 ? 'cyan' : 'white'}>
+                  {dialogCursor === 0 ? '❯ ' : '  '}
+                  {lang === 'en'
+                    ? 'Permission Mode             : '
+                    : 'Modo de permisos            : '}
+                  {formatPermissionModeLabel(settings.permissionMode)}
+                </Text>
+                <Text color={dialogCursor === 1 ? 'cyan' : 'white'}>
+                  {dialogCursor === 1 ? '❯ ' : '  '}
+                  {lang === 'en'
+                    ? 'Sub-Mode                    : '
+                    : 'Sub-Modo                    : '}
+                  {formatSubModeLabel(settings.subMode, lang)}
+                </Text>
+                <Text color={dialogCursor === 2 ? 'cyan' : 'white'}>
+                  {dialogCursor === 2 ? '❯ ' : '  '}
+                  {lang === 'en'
+                    ? 'Default Effort              : '
+                    : 'Esfuerzo por defecto        : '}
+                  {settings.effort.toUpperCase()}
+                </Text>
+                <Text color={dialogCursor === 3 ? 'cyan' : 'white'}>
+                  {dialogCursor === 3 ? '❯ ' : '  '}Thoughts                    :{' '}
+                  {settings.thoughts ? 'ON' : 'OFF'}
+                </Text>
+                <Text color={dialogCursor === 4 ? 'cyan' : 'white'}>
+                  {dialogCursor === 4 ? '❯ ' : '  '}
+                  {lang === 'en'
+                    ? '--DAA Startup Warning       : '
+                    : 'Advertencia --DAA al inicio : '}
+                  {settings.hideDaaWarning ? 'OFF' : 'ON'}
+                </Text>
+                <Text color={dialogCursor === 5 ? 'cyan' : 'white'}>
+                  {dialogCursor === 5 ? '❯ ' : '  '}
+                  {lang === 'en'
+                    ? 'Language / Idioma           : '
+                    : 'Idioma / Language           : '}
+                  {lang === 'en' ? 'English' : 'Español'}
+                </Text>
+              </Box>
+
+              {/* Segunda TUI contextual que explica la opción sobre la que está el cursor */}
+              <Box
+                flexDirection="column"
+                borderStyle="round"
+                borderColor="yellow"
+                paddingX={2}
+                paddingY={0}
+              >
+                <Text bold color="yellow">
+                  ℹ {detail.title}
+                </Text>
+                <Box flexDirection="row">
+                  <Text bold color="cyan">
+                    {detail.availableModesLabel}{' '}
+                  </Text>
+                  <Text color="white">{detail.availableModes}</Text>
+                </Box>
+                <Box flexDirection="row">
+                  <Text bold color="green">
+                    {detail.whatItDoesLabel}{' '}
+                  </Text>
+                  <Text color="white">{detail.whatItDoes}</Text>
+                </Box>
+              </Box>
+            </Box>
+          );
+        })()}
       </Box>
 
       {/* ZONA INFERIOR ANCLADA ABAJO */}

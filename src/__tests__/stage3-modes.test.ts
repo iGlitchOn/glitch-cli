@@ -16,7 +16,10 @@ import {
   classifyActionRisk,
   toggleSubMode,
 } from '../permissions/permissions.js';
-import { runSettingsCommand } from '../commands/settings.js';
+import {
+  getSettingHelpDetail,
+  runSettingsCommand,
+} from '../commands/settings.js';
 
 describe('Etapa 3: Modos de permiso, checkPermission, Sub-modos (Plan/Agent) y /settings', () => {
   let tempHome: string;
@@ -147,5 +150,12 @@ describe('Etapa 3: Modos de permiso, checkPermission, Sub-modos (Plan/Agent) y /
     expect(persisted.permissionMode).toBe('ask_insecure');
     expect(persisted.subMode).toBe('plan');
     expect(persisted.thoughts).toBe(false);
+
+    // Verifica la segunda TUI explicativa contextual en /settings (/ajustes)
+    const daaHelpEs = getSettingHelpDetail(4, 'es');
+    expect(daaHelpEs.availableModesLabel).toBe('Modos disponibles:');
+    expect(daaHelpEs.availableModes).toContain('Activa');
+    expect(daaHelpEs.whatItDoesLabel).toBe('¿Qué hace?');
+    expect(daaHelpEs.whatItDoes).toContain('--dangerously-always-allow');
   });
 });
