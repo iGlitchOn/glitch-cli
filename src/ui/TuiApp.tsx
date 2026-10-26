@@ -15,7 +15,9 @@ import {
 } from '../config/settings.js';
 import {
   LOCAL_GOOGLE_MODELS,
+  formatModelRowColumns,
   getModelDefinition,
+  groupModelsByFamilyPages,
   listVertexGoogleModels,
 } from '../config/models.js';
 import { runEffortCommand } from '../commands/effort.js';
@@ -96,6 +98,8 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
   // Estado del diálogo /model y /settings
   const [dialogCursor, setDialogCursor] = useState(0);
+  const [modelPageIdx, setModelPageIdx] = useState(0);
+  const modelPages = groupModelsByFamilyPages(availableModels);
 
   const syncSettings = (next: GlitchSettings) => {
     sessionRef.current.settings = next;
@@ -283,13 +287,21 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           effort: nextEffort,
         };
         syncSettings(updated);
-        addSystemMessage(`✓ Modelo cambiado a ${updated.model}.`);
+        addSystemMessage(`✓ Modelo cambiado a ${def.name} (${updated.model}).`);
         return;
       }
+      const foundPageIdx = Math.max(
+        0,
+        modelPages.findIndex((p) =>
+          p.models.some((m) => m.id === settings.model),
+        ),
+      );
+      const pageModels = modelPages[foundPageIdx]?.models ?? [];
       const currentIdx = Math.max(
         0,
-        availableModels.findIndex((m) => m.id === settings.model),
+        pageModels.findIndex((m) => m.id === settings.model),
       );
+      setModelPageIdx(foundPageIdx);
       setDialogCursor(currentIdx);
       setActiveDialog('model');
       return;
@@ -460,21 +472,38 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    // Manejo del diálogo /model
+    // Manejo del diálogo /model (con paginación por familia ← / →)
     if (activeDialog === 'model') {
+      const currentPage = modelPages[modelPageIdx] ?? modelPages[0];
+      const pageModels = currentPage?.models ?? [];
+
       if (key.escape) {
         setActiveDialog('none');
         return;
       }
-      if (key.upArrow) {
+      if (key.leftArrow && modelPages.length > 0) {
+        setModelPageIdx((prev) =>
+          prev > 0 ? prev - 1 : modelPages.length - 1,
+        );
+        setDialogCursor(0);
+        return;
+      }
+      if (key.rightArrow && modelPages.length > 0) {
+        setModelPageIdx((prev) =>
+          prev < modelPages.length - 1 ? prev + 1 : 0,
+        );
+        setDialogCursor(0);
+        return;
+      }
+      if (key.upArrow && pageModels.length > 0) {
         setDialogCursor((prev) =>
-          prev > 0 ? prev - 1 : availableModels.length - 1,
+          prev > 0 ? prev - 1 : pageModels.length - 1,
         );
         return;
       }
-      if (key.downArrow) {
+      if (key.downArrow && pageModels.length > 0) {
         setDialogCursor((prev) =>
-          prev < availableModels.length - 1 ? prev + 1 : 0,
+          prev < pageModels.length - 1 ? prev + 1 : 0,
         );
         return;
       }
@@ -486,7 +515,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           setActiveDialog('none');
           return;
         }
-        const picked = availableModels[dialogCursor];
+        const picked = pageModels[dialogCursor];
         if (picked) {
           const nextEffort =
             picked.supportedEfforts.length > 0 &&
@@ -500,7 +529,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           };
           syncSettings(updated);
           addSystemMessage(
-            `✓ Modelo seleccionado: ${picked.id} (${picked.supportedEfforts.length > 0 ? `effort: ${updated.effort.toUpperCase()}` : 'effort: N/A'})`,
+            `✓ Modelo seleccionado: ${picked.name} | ${picked.id} (${picked.supportedEfforts.length > 0 ? `effort: ${updated.effort.toUpperCase()}` : 'effort: N/A'})`,
           );
         }
         setActiveDialog('none');
@@ -769,22 +798,69 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           paddingY={1}
           marginBottom={1}
         >
-          <Text bold color="cyan">
-            Selector de Modelos (/model) — ↑/↓ para elegir, Enter confirmar, Esc salir
-          </Text>
-          {availableModels.map((m, idx) => {
+          <Box flexDirection="row" justifyContent="space-between" marginBottom={1}>
+            <Text bold color="cyan">
+              Selector de Modelos (/model)
+            </Text>
+            <Text color="gray">
+              ←/→ cambiar familia · ↑/↓ elegir · Enter confirmar · Esc salir
+            </Text>
+          </Box>
+
+          {/* Pestañas de familias (Página 1: Gemini | Página 2: Gemma | Página 3: Nano Banana & Imagen) */}
+          <Box flexDirection="row" marginBottom={1}>
+            <Text color="cyan" bold>
+              {'◄ '}
+            </Text>
+            {modelPages.map((page, pIdx) => {
+              const isCurrentPage = pIdx === modelPageIdx;
+              return (
+                <Box key={page.family} marginRight={2}>
+                  <Text
+                    bold={isCurrentPage}
+                    color={isCurrentPage ? 'cyan' : 'gray'}
+                  >
+                    {`[Pág ${pIdx + 1}/${modelPages.length}: ${page.title}]`}
+                  </Text>
+                </Box>
+              );
+            })}
+            <Text color="cyan" bold>
+              {'►'}
+            </Text>
+          </Box>
+
+          {/* Encabezado de tabla separada */}
+          <Box flexDirection="column" marginBottom={1}>
+            <Text bold color="white">
+              {'  '}
+              {'NOMBRE DEL MODELO'.padEnd(38, ' ')}
+              {' | '}
+              {'ID MODELO'.padEnd(34, ' ')}
+              {' | '}
+              {'EFFORTS APLICABLES'}
+            </Text>
+            <Text color="gray">{'  ' + '─'.repeat(96)}</Text>
+          </Box>
+
+          {/* Filas de la familia actual */}
+          {(modelPages[modelPageIdx]?.models ?? []).map((m, idx) => {
             const isSelected = idx === dialogCursor;
             const isCurrent = m.id === settings.model;
-            const effortsLabel =
-              m.supportedEfforts.length > 0
-                ? `effort: ${m.supportedEfforts.join('/')}`
-                : 'effort: no aplica';
+            const cols = formatModelRowColumns(m, isCurrent, 38, 34);
             return (
-              <Text key={m.id} color={isSelected ? 'cyan' : 'white'}>
-                {isSelected ? '❯ ' : '  '}
-                {m.id} — {m.name} [{effortsLabel}]
-                {isCurrent ? ' (actual)' : ''}
-              </Text>
+              <Box key={m.id} flexDirection="row">
+                <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
+                  {isSelected ? '❯ ' : '  '}
+                  {cols.nameCol}
+                </Text>
+                <Text color="gray">{' | '}</Text>
+                <Text color={isSelected ? 'cyan' : 'gray'}>{cols.idCol}</Text>
+                <Text color="gray">{' | '}</Text>
+                <Text color={isSelected ? 'cyan' : 'yellow'}>
+                  {cols.effortsCol}
+                </Text>
+              </Box>
             );
           })}
         </Box>

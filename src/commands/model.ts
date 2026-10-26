@@ -1,5 +1,7 @@
 import {
+  formatModelRowColumns,
   getModelDefinition,
+  groupModelsByFamilyPages,
   type ModelDefinition,
 } from '../config/models.js';
 import {
@@ -39,14 +41,23 @@ export async function runModelCommand(
       selectedId = trimmedArg;
     }
   } else {
-    out('=== Modelos disponibles (/model) ===');
-    availableModels.forEach((m, idx) => {
-      const currentMarker = m.id === currentSettings.model ? ' (actual)' : '';
-      const effortsText =
-        m.supportedEfforts.length > 0
-          ? `effort: ${m.supportedEfforts.join('/')}`
-          : 'effort: no aplica';
-      out(`  ${idx + 1}) ${m.id} — ${m.name} [${effortsText}]${currentMarker}`);
+    const pages = groupModelsByFamilyPages(availableModels);
+    out('=== Modelos disponibles por familia (/model) ===');
+    out(
+      `  ${'NOMBRE DEL MODELO'.padEnd(38, ' ')} | ${'ID MODELO'.padEnd(34, ' ')} | EFFORTS APLICABLES`,
+    );
+    out('  ' + '-'.repeat(96));
+    let globalIdx = 1;
+    pages.forEach((page, pageIdx) => {
+      out(`  [Página ${pageIdx + 1}/${pages.length}: ${page.title}]`);
+      for (const m of page.models) {
+        const isCurrent = m.id === currentSettings.model;
+        const row = formatModelRowColumns(m, isCurrent);
+        out(
+          `  ${String(globalIdx).padStart(2, ' ')}) ${row.formatted}`,
+        );
+        globalIdx++;
+      }
     });
 
     const answer = (
@@ -99,7 +110,7 @@ export async function runModelCommand(
   const effortNotice =
     def.supportedEfforts.length > 0
       ? ` (effort activo: ${updated.effort.toUpperCase()})`
-      : ' (effort: no aplica)';
-  out(`✓ Modelo cambiado a ${updated.model}${effortNotice}.`);
+      : ' (effort: N/A)';
+  out(`✓ Modelo cambiado a ${def.name} (${updated.model})${effortNotice}.`);
   return updated;
 }

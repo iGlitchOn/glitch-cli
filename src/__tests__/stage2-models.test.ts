@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   LOCAL_GOOGLE_MODELS,
   buildVertexThinkingConfig,
+  formatModelRowColumns,
+  groupModelsByFamilyPages,
   isGoogleFreeTrialModelId,
   listVertexGoogleModels,
 } from '../config/models.js';
@@ -177,6 +179,26 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     });
     expect(noEffortBar).toBe(
       '[Modelo: gemma-3-27b-it | Effort: N/A | Modo: Ask only insecure | Sub-modo: Agent]',
+    );
+  });
+
+  it('separa los modelos en páginas por familia (Gemini, Gemma, Nano Banana) y formatea NOMBRE (active) | ID | EFFORTS en orden', () => {
+    const pages = groupModelsByFamilyPages(LOCAL_GOOGLE_MODELS);
+    expect(pages.map((p) => p.family)).toEqual([
+      'gemini',
+      'gemma',
+      'nano-banana',
+    ]);
+
+    const argonModel = LOCAL_GOOGLE_MODELS.find(
+      (m) => m.id === 'gemini-4-argon',
+    )!;
+    const activeRow = formatModelRowColumns(argonModel, true);
+    expect(activeRow.nameCol).toContain('Gemini 4 Argon (active)');
+    expect(activeRow.idCol.trim()).toBe('gemini-4-argon');
+    expect(activeRow.effortsCol).toBe('LOW, MEDIUM, HIGH');
+    expect(activeRow.formatted).toContain(
+      '| gemini-4-argon                     | LOW, MEDIUM, HIGH',
     );
   });
 });

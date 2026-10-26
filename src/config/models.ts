@@ -5,21 +5,48 @@ import {
 } from '@google/genai';
 import type { EffortLevel, ProviderType } from './settings.js';
 
+export type ModelFamily = 'gemini' | 'gemma' | 'nano-banana' | 'custom';
+
+export interface ModelFamilyPage {
+  family: ModelFamily;
+  title: string;
+  models: ModelDefinition[];
+}
+
 export interface ModelDefinition {
   id: string;
   name: string;
-  family: 'gemini' | 'gemma' | 'custom';
+  family: ModelFamily;
   supportedEfforts: EffortLevel[];
   defaultEffort?: EffortLevel;
   supportsThoughts: boolean;
   forbidThinkingBudget?: boolean;
 }
 
+const EFFORT_SORT_ORDER: Record<EffortLevel, number> = {
+  low: 1,
+  medium: 2,
+  high: 3,
+};
+
+export function formatOrderedEfforts(efforts: readonly EffortLevel[]): string {
+  if (efforts.length === 0) {
+    return 'N/A';
+  }
+  return [...efforts]
+    .sort((a, b) => EFFORT_SORT_ORDER[a] - EFFORT_SORT_ORDER[b])
+    .map((e) => e.toUpperCase())
+    .join(', ');
+}
+
 /**
- * Registro local de modelos oficiales de Google en Vertex AI (Gemini y Gemma).
- * Excluye modelos de terceros (Claude, Llama, Mistral) que no entran en el Free Trial.
+ * Registro local de modelos oficiales de Google en Vertex AI:
+ * - Familia 1 (gemini): Gemini 4 Argon, Gemini 3.1, Gemini 3, Gemini 2.5, Gemini 2.0
+ * - Familia 2 (gemma): Gemma 3 (27B, 12B, 4B)
+ * - Familia 3 (nano-banana): Nano Banana / Gemini Flash Image & Imagen 3
  */
 export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
+  // Página 1: Familia Gemini
   {
     id: 'gemini-4-argon',
     name: 'Gemini 4 Argon',
@@ -31,7 +58,7 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
   },
   {
     id: 'gemini-4-argon-cyber-permissive',
-    name: 'Gemini 4 Argon (Cyber Permissive)',
+    name: 'Gemini 4 Argon Cyber Permissive',
     family: 'gemini',
     supportedEfforts: ['high'],
     defaultEffort: 'high',
@@ -109,6 +136,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     supportedEfforts: [],
     supportsThoughts: false,
   },
+
+  // Página 2: Familia Gemma
   {
     id: 'gemma-3-27b-it',
     name: 'Gemma 3 27B IT',
@@ -130,7 +159,82 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     supportedEfforts: [],
     supportsThoughts: false,
   },
+
+  // Página 3: Familia Nano Banana & Imagen
+  {
+    id: 'gemini-2.5-flash-image',
+    name: 'Nano Banana (Gemini 2.5 Flash Image)',
+    family: 'nano-banana',
+    supportedEfforts: [],
+    supportsThoughts: false,
+  },
+  {
+    id: 'gemini-3-pro-image-preview',
+    name: 'Nano Banana Pro (Gemini 3 Pro Image)',
+    family: 'nano-banana',
+    supportedEfforts: ['low', 'high'],
+    defaultEffort: 'high',
+    supportsThoughts: true,
+    forbidThinkingBudget: true,
+  },
+  {
+    id: 'imagen-3.0-generate-002',
+    name: 'Imagen 3 Generate',
+    family: 'nano-banana',
+    supportedEfforts: [],
+    supportsThoughts: false,
+  },
+  {
+    id: 'imagen-3.0-fast-generate-001',
+    name: 'Imagen 3 Fast',
+    family: 'nano-banana',
+    supportedEfforts: [],
+    supportsThoughts: false,
+  },
 ];
+
+export function groupModelsByFamilyPages(
+  models: readonly ModelDefinition[],
+): ModelFamilyPage[] {
+  const familyMeta: Array<{ family: ModelFamily; title: string }> = [
+    { family: 'gemini', title: 'Gemini' },
+    { family: 'gemma', title: 'Gemma' },
+    { family: 'nano-banana', title: 'Nano Banana & Imagen' },
+    { family: 'custom', title: 'Custom' },
+  ];
+
+  const pages: ModelFamilyPage[] = [];
+  for (const meta of familyMeta) {
+    const familyModels = models.filter((m) => m.family === meta.family);
+    if (familyModels.length > 0) {
+      pages.push({
+        family: meta.family,
+        title: meta.title,
+        models: familyModels,
+      });
+    }
+  }
+  return pages;
+}
+
+export function formatModelRowColumns(
+  model: ModelDefinition,
+  isActive: boolean,
+  nameColWidth = 38,
+  idColWidth = 34,
+): { nameCol: string; idCol: string; effortsCol: string; formatted: string } {
+  const activeSuffix = isActive ? ' (active)' : '';
+  const rawName = `${model.name}${activeSuffix}`;
+  const nameCol = rawName.padEnd(nameColWidth, ' ');
+  const idCol = model.id.padEnd(idColWidth, ' ');
+  const effortsCol = formatOrderedEfforts(model.supportedEfforts);
+  return {
+    nameCol,
+    idCol,
+    effortsCol,
+    formatted: `${nameCol} | ${idCol} | ${effortsCol}`,
+  };
+}
 
 export function isGoogleFreeTrialModelId(rawId: string): boolean {
   const normalized = normalizeModelId(rawId).toLowerCase();
@@ -144,7 +248,11 @@ export function isGoogleFreeTrialModelId(rawId: string): boolean {
   ) {
     return false;
   }
-  return normalized.startsWith('gemini-') || normalized.startsWith('gemma-');
+  return (
+    normalized.startsWith('gemini-') ||
+    normalized.startsWith('gemma-') ||
+    normalized.startsWith('imagen-')
+  );
 }
 
 export function normalizeModelId(rawName: string): string {
@@ -171,6 +279,16 @@ export function getModelDefinition(
       supportedEfforts: ['low', 'medium', 'high'],
       defaultEffort: 'medium',
       supportsThoughts: true,
+    };
+  }
+
+  if (cleanId.includes('image') || cleanId.startsWith('imagen-')) {
+    return {
+      id: cleanId,
+      name: cleanId,
+      family: 'nano-banana',
+      supportedEfforts: [],
+      supportsThoughts: false,
     };
   }
 
@@ -260,11 +378,6 @@ const EFFORT_TO_THINKING_LEVEL: Record<EffortLevel, ThinkingLevel> = {
   high: ThinkingLevel.HIGH,
 };
 
-/**
- * Construye thinkingConfig para Vertex AI garantizando que:
- * - Nunca se envíe thinkingBudget ni MINIMAL a Argon (causan HTTP 400).
- * - Solo se envíe thinkingLevel si el modelo lo soporta y dentro de sus niveles permitidos.
- */
 export function buildVertexThinkingConfig(
   modelId: string,
   effort: EffortLevel,
@@ -287,7 +400,6 @@ export function buildVertexThinkingConfig(
     config.thinkingLevel = EFFORT_TO_THINKING_LEVEL[effectiveEffort];
   }
 
-  // Guardia explícita anti-400 para Argon: jamás permitir thinkingBudget ni MINIMAL
   if (def.forbidThinkingBudget || def.id.includes('argon')) {
     delete (config as Record<string, unknown>)['thinkingBudget'];
     if (config.thinkingLevel === ThinkingLevel.MINIMAL) {
