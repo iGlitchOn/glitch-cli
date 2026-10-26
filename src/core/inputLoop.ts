@@ -16,15 +16,21 @@ export interface InputDispatcherOptions {
 }
 
 export function printHelpMenu(out: OutputFn = console.log): void {
-  out('Comandos disponibles:');
+  out('Comandos dentro de Glitch CLI:');
   out('  /auth                     Configurar conexión (Vertex AI o API personalizada)');
-  out('  /settings                 Panel de preferencias (modo, sub-modo, effort, thoughts)');
-  out('  /model [id|num]           Seleccionar modelo disponible (bloqueado durante petición activa)');
-  out('  /effort [low|medium|high] Ver o cambiar el nivel de effort del modelo actual en vivo');
+  out('  /settings                 Panel de preferencias (Modo, Sub-Modo, Esfuerzo, Thoughts, Aviso --DAA)');
+  out('  /model [id|num]           Seleccionar modelo por páginas (←/→ familia, ↑/↓ modelo)');
+  out('  /effort [low|medium|high] Ver o cambiar el nivel de esfuerzo del modelo actual en vivo');
   out('  /help                     Mostrar esta ayuda');
   out('  /exit                     Salir de Glitch CLI');
-  out('Atajos de teclado:');
-  out('  Shift+Tab / Alt+P         Alternar Sub-modo (Plan <-> Agent) en vivo');
+  out('Flags al iniciar en terminal:');
+  out('  glitch --DAA                        Iniciar en modo Always Allow sin sandbox (acceso total al PC)');
+  out('  glitch --dangerously-always-allow   Equivalente a --DAA');
+  out('  glitch --model gemini-2.5-flash     Iniciar directamente con un modelo específico');
+  out('  glitch -m "gemini-2.5-flash"        Forma corta para elegir modelo al iniciar');
+  out('Atajos y Cola de Mensajes (Queue):');
+  out('  Shift+Tab / Alt+P         Alternar Sub-Modo (Plan <-> Agent) en vivo');
+  out('  ↑ / ↓ durante respuesta   Subir/bajar por los mensajes en cola (Queue) y Enter para editarlos en su misma posición');
 }
 
 /**

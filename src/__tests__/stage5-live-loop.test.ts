@@ -129,4 +129,85 @@ describe('Etapa 5: Slash commands en vivo con AgentLoop separado del InputLoop',
     );
     expect(allHistoryTexts.some((t) => t.startsWith('/'))).toBe(false);
   });
+
+  it('encola múltiples mensajes en fila FIFO y permite subir 2 veces entre 3 encolados para editar el 2do en su misma posición', async () => {
+    const session = new SessionState({
+      ...DEFAULT_SETTINGS,
+      provider: 'vertex',
+      vertex: { project: 'proj-queue', location: 'us-central1' },
+      model: 'gemini-4-argon',
+      effort: 'medium',
+    });
+
+    let callIndex = 0;
+    let releaseFirstCall!: () => void;
+    const firstCallStarted = new Promise<void>((res) => {
+      releaseFirstCall = res;
+    });
+    let allowFirstCallToFinish!: () => void;
+    const firstCallGate = new Promise<void>((res) => {
+      allowFirstCallToFinish = res;
+    });
+
+    const receivedUserPrompts: string[] = [];
+
+    const fakeAdapter: ProviderAdapter = {
+      id: 'vertex',
+      async *streamTurn(
+        history: readonly Content[],
+      ): AsyncGenerator<ProviderStreamChunk, void, unknown> {
+        callIndex++;
+        const lastUserText = history.at(-1)?.parts?.[0]?.text ?? '';
+        receivedUserPrompts.push(lastUserText);
+        if (callIndex === 1) {
+          releaseFirstCall();
+          await firstCallGate;
+        }
+        yield {
+          text: `respuesta-${callIndex}`,
+          rawParts: [{ text: `respuesta-${callIndex}` }],
+        };
+      },
+    };
+
+    const agentLoop = new AgentLoop(session, () => fakeAdapter, () => {});
+
+    // Inicia una tarea activa y luego encola 3 prompts más en fila
+    const activePromise = agentLoop.enqueuePrompt('Tarea inicial corriendo');
+    await firstCallStarted;
+
+    void agentLoop.enqueuePrompt('Prompt en cola 1');
+    void agentLoop.enqueuePrompt('Prompt en cola 2 (original)');
+    void agentLoop.enqueuePrompt('Prompt en cola 3');
+
+    expect(agentLoop.getQueuedPrompts()).toEqual([
+      'Prompt en cola 1',
+      'Prompt en cola 2 (original)',
+      'Prompt en cola 3',
+    ]);
+
+    // Si hay 3 en cola y el usuario sube 2 veces (↑ ↑), accede al segundo prompt (índice 1) sin tocar el tercero
+    const targetIdx = agentLoop.getQueueIndexFromStepsUp(2);
+    expect(targetIdx).toBe(1);
+    const updatedOk = agentLoop.updateQueuedPromptAt(
+      targetIdx,
+      'Prompt en cola 2 (EDITADO)',
+    );
+    expect(updatedOk).toBe(true);
+    expect(agentLoop.getQueuedPrompts()).toEqual([
+      'Prompt en cola 1',
+      'Prompt en cola 2 (EDITADO)',
+      'Prompt en cola 3',
+    ]);
+
+    allowFirstCallToFinish();
+    await activePromise;
+
+    expect(receivedUserPrompts).toEqual([
+      'Tarea inicial corriendo',
+      'Prompt en cola 1',
+      'Prompt en cola 2 (EDITADO)',
+      'Prompt en cola 3',
+    ]);
+  });
 });

@@ -1,12 +1,23 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { getModelDefinition } from './models.js';
 
 export type ProviderType = 'vertex' | 'custom';
 export type CustomEndpointFormat = 'chat_completions' | 'responses';
 export type EffortLevel = 'low' | 'medium' | 'high';
 export type PermissionMode = 'always_allow' | 'ask_insecure' | 'always_ask';
 export type SubMode = 'plan' | 'agent';
+
+export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
+  always_allow: 'Always Allow',
+  ask_insecure: 'Ask only insecure',
+  always_ask: 'Always Ask',
+};
+
+export function formatPermissionModeLabel(mode: PermissionMode): string {
+  return PERMISSION_MODE_LABELS[mode] ?? 'Always Allow';
+}
 
 export interface VertexConfig {
   project: string;
@@ -28,6 +39,7 @@ export interface GlitchSettings {
   thoughts: boolean;
   permissionMode: PermissionMode;
   subMode: SubMode;
+  hideDaaWarning?: boolean;
 }
 
 export const DEFAULT_SETTINGS: GlitchSettings = {
@@ -36,18 +48,48 @@ export const DEFAULT_SETTINGS: GlitchSettings = {
   thoughts: true,
   permissionMode: 'always_allow',
   subMode: 'agent',
+  hideDaaWarning: false,
 };
 
 export function hasAlwaysAllowFlag(argv: readonly string[]): boolean {
   return argv.some((arg) => {
     const clean = arg.trim();
     return (
+      clean === '--DAA' ||
+      clean === '--daa' ||
+      clean === '-DAA' ||
+      clean === '--DDA' ||
+      clean === '--dda' ||
       clean === '-AA' ||
       clean === '--aa' ||
       clean === '--AA' ||
       clean === '--dangerously-always-allow'
     );
   });
+}
+
+export function parseModelFlag(argv: readonly string[]): string | undefined {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]?.trim() ?? '';
+    if ((arg === '--model' || arg === '-m') && i + 1 < argv.length) {
+      const val = argv[i + 1]?.trim().replace(/^["']|["']$/g, '');
+      if (val && !val.startsWith('-')) {
+        return val;
+      }
+    }
+    if (arg.startsWith('--model=')) {
+      const val = arg
+        .slice('--model='.length)
+        .trim()
+        .replace(/^["']|["']$/g, '');
+      if (val) return val;
+    }
+    if (arg.startsWith('-m=')) {
+      const val = arg.slice('-m='.length).trim().replace(/^["']|["']$/g, '');
+      if (val) return val;
+    }
+  }
+  return undefined;
 }
 
 export function getSettingsPath(customHomeDir?: string): string {
@@ -99,6 +141,18 @@ export function loadSettings(
 
   if (hasAlwaysAllowFlag(argv)) {
     merged.permissionMode = 'always_allow';
+  }
+
+  const cliModel = parseModelFlag(argv);
+  if (cliModel) {
+    const def = getModelDefinition(cliModel, merged.provider ?? 'vertex');
+    merged.model = def.id;
+    if (
+      def.supportedEfforts.length > 0 &&
+      !def.supportedEfforts.includes(merged.effort)
+    ) {
+      merged.effort = def.defaultEffort ?? def.supportedEfforts[0]!;
+    }
   }
 
   return merged;

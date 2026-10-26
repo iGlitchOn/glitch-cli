@@ -1,15 +1,9 @@
 import { getModelDefinition } from '../config/models.js';
-import type {
-  GlitchSettings,
-  PermissionMode,
-  SubMode,
+import {
+  formatPermissionModeLabel,
+  type GlitchSettings,
+  type SubMode,
 } from '../config/settings.js';
-
-const PERMISSION_LABELS: Record<PermissionMode, string> = {
-  always_allow: 'Always Allow',
-  ask_insecure: 'Ask only insecure',
-  always_ask: 'Always Ask',
-};
 
 const SUBMODE_LABELS: Record<SubMode, string> = {
   plan: 'Plan',
@@ -27,8 +21,8 @@ export function formatStatusBar(settings: GlitchSettings): string {
         ).toUpperCase()
       : 'N/A';
 
-  const modeLabel = PERMISSION_LABELS[settings.permissionMode];
+  const modeLabel = formatPermissionModeLabel(settings.permissionMode);
   const subModeLabel = SUBMODE_LABELS[settings.subMode];
 
-  return `[Modelo: ${settings.model} | Effort: ${effortLabel} | Modo: ${modeLabel} | Sub-modo: ${subModeLabel}]`;
+  return `Modelo: ${def.name} | Esfuerzo: ${effortLabel} | Modo: ${modeLabel} | Sub-Modo: ${subModeLabel}`;
 }

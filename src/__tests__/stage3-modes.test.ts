@@ -4,8 +4,10 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_SETTINGS,
+  formatPermissionModeLabel,
   hasAlwaysAllowFlag,
   loadSettings,
+  parseModelFlag,
   saveSettings,
   type GlitchSettings,
 } from '../config/settings.js';
@@ -29,16 +31,27 @@ describe('Etapa 3: Modos de permiso, checkPermission, Sub-modos (Plan/Agent) y /
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
-  it('usa Always Allow por defecto y soporta flags -AA y --dangerously-always-allow', () => {
+  it('usa Always Allow por defecto y soporta flags --DAA, --dangerously-always-allow, --model y -m', () => {
     expect(DEFAULT_SETTINGS.permissionMode).toBe('always_allow');
-    expect(hasAlwaysAllowFlag(['-AA'])).toBe(true);
+    expect(formatPermissionModeLabel('always_allow')).toBe('Always Allow');
+    expect(hasAlwaysAllowFlag(['--DAA'])).toBe(true);
+    expect(hasAlwaysAllowFlag(['--DDA'])).toBe(true);
     expect(hasAlwaysAllowFlag(['--dangerously-always-allow'])).toBe(true);
     expect(hasAlwaysAllowFlag(['--version'])).toBe(false);
 
-    // Incluso si el archivo guardó always_ask, pasar -AA fuerza always_allow
+    expect(parseModelFlag(['--model', 'gemini-2.5-flash'])).toBe(
+      'gemini-2.5-flash',
+    );
+    expect(parseModelFlag(['-m', 'gemini-2.5-flash'])).toBe('gemini-2.5-flash');
+
     saveSettings({ ...baseSettings, permissionMode: 'always_ask' }, tempHome);
-    const loadedWithFlag = loadSettings(tempHome, ['-AA']);
-    expect(loadedWithFlag.permissionMode).toBe('always_allow');
+    const loadedWithFlags = loadSettings(tempHome, [
+      '--DAA',
+      '-m',
+      'gemini-2.5-flash',
+    ]);
+    expect(loadedWithFlags.permissionMode).toBe('always_allow');
+    expect(loadedWithFlags.model).toBe('gemini-2.5-flash');
   });
 
   it('clasifica acciones en safe e insecure correctamente', () => {

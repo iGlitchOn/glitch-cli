@@ -162,18 +162,19 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     expect(switched.effort).toBe('high');
   });
 
-  it('renderiza la barra de estado con modelo, effort, modo (Always Allow por defecto) y sub-modo', () => {
+  it('renderiza la barra de estado sin corchetes y con el nombre físico del modelo, Esfuerzo, Modo y Sub-Modo', () => {
     const bar = formatStatusBar(baseSettings);
     expect(bar).toBe(
-      '[Modelo: gemini-4-argon | Effort: MEDIUM | Modo: Always Allow | Sub-modo: Agent]',
+      'Modelo: Gemini 4 Argon | Esfuerzo: MEDIUM | Modo: Always Allow | Sub-Modo: Agent',
     );
 
     const noEffortBar = formatStatusBar({
       ...baseSettings,
       model: 'gemma-3-27b-it',
+      subMode: 'plan',
     });
     expect(noEffortBar).toBe(
-      '[Modelo: gemma-3-27b-it | Effort: N/A | Modo: Always Allow | Sub-modo: Agent]',
+      'Modelo: Gemma 3 27B IT | Esfuerzo: N/A | Modo: Always Allow | Sub-Modo: Plan',
     );
   });
 

@@ -1,4 +1,5 @@
 import {
+  formatPermissionModeLabel,
   saveSettings,
   type EffortLevel,
   type GlitchSettings,
@@ -26,41 +27,41 @@ export async function runSettingsCommand(
   out: OutputFn = console.log,
   customHomeDir?: string,
 ): Promise<GlitchSettings> {
-  const modeLabel =
-    PERMISSION_OPTIONS.find((p) => p.id === currentSettings.permissionMode)
-      ?.label ?? currentSettings.permissionMode;
-  const subModeLabel =
-    currentSettings.subMode === 'plan' ? 'Plan' : 'Agent';
+  const modeLabel = formatPermissionModeLabel(currentSettings.permissionMode);
+  const subModeLabel = currentSettings.subMode === 'plan' ? 'Plan' : 'Agent';
   const thoughtsLabel = currentSettings.thoughts ? 'ON' : 'OFF';
+  const daaWarningLabel = currentSettings.hideDaaWarning ? 'OFF' : 'ON';
 
   out('=== Panel de Configuración y Comandos (/settings) ===');
   out('Comandos disponibles:');
-  out('  /auth                  Configurar conexión (Vertex AI o API personalizada)');
-  out('  /settings              Abrir este panel de preferencias');
-  out('  /model [id|num]        Seleccionar modelo disponible');
+  out('  /auth                     Configurar conexión (Vertex AI o API personalizada)');
+  out('  /settings                 Abrir este panel de preferencias');
+  out('  /model [id|num]           Seleccionar modelo disponible');
   out('  /effort [low|medium|high] Ver o cambiar el nivel de effort en vivo');
-  out('  /help                  Mostrar ayuda de comandos');
-  out('  /exit                  Salir de Glitch CLI');
-  out('  Atajo de teclado       Shift+Tab (alterna Sub-modo Plan <-> Agent en vivo)');
+  out('  /help                     Mostrar ayuda y flags de línea de comandos');
+  out('  /exit                     Salir de Glitch CLI');
+  out('  Atajo de teclado          Shift+Tab (alterna Sub-Modo Plan <-> Agent en vivo)');
   out('-----------------------------------------------------');
   out('Preferencias actuales:');
-  out(`  1) Modo de permisos   : ${modeLabel}`);
-  out(`  2) Sub-modo           : ${subModeLabel}`);
-  out(`  3) Effort por defecto : ${currentSettings.effort.toUpperCase()}`);
-  out(`  4) Thoughts           : ${thoughtsLabel}`);
+  out(`  1) Modo de permisos           : ${modeLabel}`);
+  out(`  2) Sub-Modo                   : ${subModeLabel}`);
+  out(`  3) Esfuerzo por defecto       : ${currentSettings.effort.toUpperCase()}`);
+  out(`  4) Thoughts                   : ${thoughtsLabel}`);
+  out(`  5) Advertencia --DAA al inicio: ${daaWarningLabel}`);
   out('  Enter) Salir sin cambios');
 
-  const choice = (await ask('Selecciona preferencia a cambiar [1-4]: ')).trim();
+  const choice = (await ask('Selecciona preferencia a cambiar [1-5]: ')).trim();
   if (!choice) {
     return currentSettings;
   }
 
-  let updated: GlitchSettings = { ...currentSettings };
+  const updated: GlitchSettings = { ...currentSettings };
 
   if (choice === '1') {
     out('Selecciona el Modo de permisos:');
     PERMISSION_OPTIONS.forEach((opt, idx) => {
-      const active = opt.id === currentSettings.permissionMode ? ' (actual)' : '';
+      const active =
+        opt.id === currentSettings.permissionMode ? ' (actual)' : '';
       out(`  ${idx + 1}) ${opt.label}${active}`);
     });
     const ans = (await ask('Modo [1-3]: ')).trim();
@@ -68,7 +69,9 @@ export async function runSettingsCommand(
     if (idx >= 0 && idx < PERMISSION_OPTIONS.length) {
       updated.permissionMode = PERMISSION_OPTIONS[idx]!.id;
       saveSettings(updated, customHomeDir);
-      out(`✓ Modo de permisos actualizado a: ${PERMISSION_OPTIONS[idx]!.label}.`);
+      out(
+        `✓ Modo de permisos actualizado a: ${PERMISSION_OPTIONS[idx]!.label}.`,
+      );
     } else {
       out('✗ Selección de modo inválida.');
     }
@@ -76,18 +79,18 @@ export async function runSettingsCommand(
   }
 
   if (choice === '2') {
-    out('Selecciona el Sub-modo:');
+    out('Selecciona el Sub-Modo:');
     SUBMODE_OPTIONS.forEach((opt, idx) => {
       const active = opt.id === currentSettings.subMode ? ' (actual)' : '';
       out(`  ${idx + 1}) ${opt.label}${active}`);
     });
-    const ans = (await ask('Sub-modo [1-2]: ')).trim();
+    const ans = (await ask('Sub-Modo [1-2]: ')).trim();
     const idx = Number.parseInt(ans, 10) - 1;
     if (idx >= 0 && idx < SUBMODE_OPTIONS.length) {
       updated.subMode = SUBMODE_OPTIONS[idx]!.id;
       saveSettings(updated, customHomeDir);
       out(
-        `✓ Sub-modo actualizado a: ${updated.subMode === 'plan' ? 'Plan' : 'Agent'}.`,
+        `✓ Sub-Modo actualizado a: ${updated.subMode === 'plan' ? 'Plan' : 'Agent'}.`,
       );
     } else {
       out('✗ Selección de sub-modo inválida.');
@@ -96,12 +99,12 @@ export async function runSettingsCommand(
   }
 
   if (choice === '3') {
-    out('Selecciona Effort por defecto (low / medium / high):');
+    out('Selecciona Esfuerzo por defecto (low / medium / high):');
     EFFORT_OPTIONS.forEach((ef, idx) => {
       const active = ef === currentSettings.effort ? ' (actual)' : '';
       out(`  ${idx + 1}) ${ef.toUpperCase()}${active}`);
     });
-    const ans = (await ask('Effort [1-3 o low/medium/high]: '))
+    const ans = (await ask('Esfuerzo [1-3 o low/medium/high]: '))
       .trim()
       .toLowerCase();
     const byIdx = Number.parseInt(ans, 10) - 1;
@@ -112,17 +115,15 @@ export async function runSettingsCommand(
     if (picked) {
       updated.effort = picked;
       saveSettings(updated, customHomeDir);
-      out(`✓ Effort por defecto actualizado a: ${picked.toUpperCase()}.`);
+      out(`✓ Esfuerzo por defecto actualizado a: ${picked.toUpperCase()}.`);
     } else {
-      out('✗ Nivel de effort inválido.');
+      out('✗ Nivel de esfuerzo inválido.');
     }
     return updated;
   }
 
   if (choice === '4') {
-    const ans = (
-      await ask(`Thoughts [on/off, actual: ${thoughtsLabel}]: `)
-    )
+    const ans = (await ask(`Thoughts [on/off, actual: ${thoughtsLabel}]: `))
       .trim()
       .toLowerCase();
     if (ans === 'on' || ans === 'true' || ans === '1') {
@@ -134,6 +135,28 @@ export async function runSettingsCommand(
     }
     saveSettings(updated, customHomeDir);
     out(`✓ Thoughts actualizado a: ${updated.thoughts ? 'ON' : 'OFF'}.`);
+    return updated;
+  }
+
+  if (choice === '5') {
+    const ans = (
+      await ask(
+        `Advertencia --DAA al inicio [on/off, actual: ${daaWarningLabel}]: `,
+      )
+    )
+      .trim()
+      .toLowerCase();
+    if (ans === 'off' || ans === 'false' || ans === '0') {
+      updated.hideDaaWarning = true;
+    } else if (ans === 'on' || ans === 'true' || ans === '1') {
+      updated.hideDaaWarning = false;
+    } else {
+      updated.hideDaaWarning = !currentSettings.hideDaaWarning;
+    }
+    saveSettings(updated, customHomeDir);
+    out(
+      `✓ Advertencia --DAA al inicio actualizada a: ${updated.hideDaaWarning ? 'OFF' : 'ON'}.`,
+    );
     return updated;
   }
 

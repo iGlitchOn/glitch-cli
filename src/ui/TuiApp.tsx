@@ -4,6 +4,7 @@ import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import type { Part } from '@google/genai';
 import {
   formatAuthSummary,
+  formatPermissionModeLabel,
   isAuthConfigured,
   maskApiKey,
   saveSettings,
@@ -47,10 +48,10 @@ type ActiveDialog = 'none' | 'auth' | 'model' | 'settings';
 
 const SLASH_COMMANDS = [
   { cmd: '/auth', desc: 'Configurar conexión (Vertex AI o API personalizada)' },
-  { cmd: '/model', desc: 'Seleccionar modelo disponible (Gemini / Gemma / Argon)' },
-  { cmd: '/effort', desc: 'Ver o cambiar nivel de effort en vivo (low | medium | high)' },
-  { cmd: '/settings', desc: 'Preferencias (Modo de permisos, Sub-modo Plan/Agent, Effort, Thoughts)' },
-  { cmd: '/help', desc: 'Mostrar comandos y atajos disponibles' },
+  { cmd: '/model', desc: 'Seleccionar modelo por páginas (←/→ familia, ↑/↓ modelo)' },
+  { cmd: '/effort', desc: 'Ver o cambiar nivel de esfuerzo en vivo (low | medium | high)' },
+  { cmd: '/settings', desc: 'Preferencias (Modo, Sub-Modo Plan/Agent, Esfuerzo, Thoughts, Aviso --DAA)' },
+  { cmd: '/help', desc: 'Mostrar comandos, flags (-m, --model, --DAA) y atajos' },
   { cmd: '/exit', desc: 'Salir de Glitch CLI' },
 ];
 
@@ -72,6 +73,15 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const [availableModels, setAvailableModels] = useState(
     sessionRef.current.availableModels,
   );
+
+  // Pantalla de peligro --DAA de 3 segundos al iniciar (si permissionMode es always_allow y no está oculta en /settings)
+  const shouldShowDaaSplash =
+    initialSettings.permissionMode === 'always_allow' &&
+    !initialSettings.hideDaaWarning;
+  const [daaSplashSeconds, setDaaSplashSeconds] = useState<number>(
+    shouldShowDaaSplash ? 3 : 0,
+  );
+
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -82,9 +92,20 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   );
   const [suggestionIdx, setSuggestionIdx] = useState(0);
 
+  // Cola FIFO de prompts en espera y edición en su misma posición con ↑ / ↓
+  const queueRef = useRef<string[]>([]);
+  const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
+  const [editingQueueIdx, setEditingQueueIdx] = useState<number | null>(null);
+  const draftInputRef = useRef<string>('');
+
   // Estado del diálogo /auth
   const [authStep, setAuthStep] = useState<
-    'provider' | 'vertex_project' | 'vertex_location' | 'custom_url' | 'custom_key' | 'custom_format'
+    | 'provider'
+    | 'vertex_project'
+    | 'vertex_location'
+    | 'custom_url'
+    | 'custom_key'
+    | 'custom_format'
   >('provider');
   const [authChoiceIdx, setAuthChoiceIdx] = useState(0);
   const [authBuffer, setAuthBuffer] = useState('');
@@ -114,6 +135,10 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     ]);
   };
 
+  const syncQueueState = () => {
+    setQueuedPrompts([...queueRef.current]);
+  };
+
   const refreshModels = async (cfg: GlitchSettings) => {
     if (cfg.provider === 'vertex' && cfg.vertex) {
       try {
@@ -128,6 +153,22 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
   };
 
+  // Temporizador de 3 segundos para la pantalla de advertencia --DAA
+  useEffect(() => {
+    if (daaSplashSeconds <= 0) return;
+    const timer = setTimeout(() => {
+      if (daaSplashSeconds === 1) {
+        setDaaSplashSeconds(0);
+        addSystemMessage(
+          '⚠ Modo --DAA (Always Allow sin sandbox) activo. Si quieres desactivar este mensaje de advertencia al iniciar, configúralo en /settings (Advertencia --DAA al inicio: OFF).',
+        );
+      } else {
+        setDaaSplashSeconds((prev) => prev - 1);
+      }
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [daaSplashSeconds]);
+
   useEffect(() => {
     if (isAuthConfigured(initialSettings)) {
       void refreshModels(initialSettings);
@@ -135,7 +176,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   }, []);
 
   const matchingSlash =
-    activeDialog === 'none' && inputText.startsWith('/') && !inputText.includes(' ')
+    activeDialog === 'none' &&
+    inputText.startsWith('/') &&
+    !inputText.includes(' ')
       ? SLASH_COMMANDS.filter((s) =>
           s.cmd.startsWith(inputText.toLowerCase()),
         )
@@ -153,7 +196,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     throw new Error('Autenticación no configurada. Usa /auth primero.');
   };
 
-  const startStreamingPrompt = (userPrompt: string) => {
+  const runSinglePromptNow = async (userPrompt: string): Promise<void> => {
     const session = sessionRef.current;
     session.isRequestActive = true;
     setIsStreaming(true);
@@ -162,63 +205,84 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
     setMessages((prev) => [
       ...prev,
-      { id: `${Date.now()}-u`, role: 'user', text: userPrompt },
+      { id: `${Date.now()}-${Math.random()}-u`, role: 'user', text: userPrompt },
     ]);
     session.history.push({ role: 'user', parts: [{ text: userPrompt }] });
 
-    void (async () => {
-      try {
-        const live = session.getLiveCallConfig();
-        const adapter = buildAdapter();
-        const collectedParts: Part[] = [];
-        let accText = '';
-        let accThought = '';
+    try {
+      const live = session.getLiveCallConfig();
+      const adapter = buildAdapter();
+      const collectedParts: Part[] = [];
+      let accText = '';
+      let accThought = '';
 
-        for await (const chunk of adapter.streamTurn(session.history, {
-          model: live.model,
-          effort: live.effort,
-          includeThoughts: live.includeThoughts,
-          subMode: live.subMode,
-        })) {
-          if (chunk.rawParts && chunk.rawParts.length > 0) {
-            collectedParts.push(...chunk.rawParts);
-          }
-          if (chunk.thoughtText) {
-            accThought += chunk.thoughtText;
-            setLiveThought(accThought);
-          }
-          if (chunk.text) {
-            accText += chunk.text;
-            setLiveText(accText);
-          }
+      for await (const chunk of adapter.streamTurn(session.history, {
+        model: live.model,
+        effort: live.effort,
+        includeThoughts: live.includeThoughts,
+        subMode: live.subMode,
+      })) {
+        if (chunk.rawParts && chunk.rawParts.length > 0) {
+          collectedParts.push(...chunk.rawParts);
         }
-
-        session.history.push({
-          role: 'model',
-          parts:
-            collectedParts.length > 0
-              ? collectedParts
-              : [{ text: accText }],
-        });
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `${Date.now()}-m`,
-            role: 'model',
-            text: accText || '(sin respuesta de texto)',
-            thoughtText: accThought || undefined,
-          },
-        ]);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        addSystemMessage(`✗ Error: ${msg}`);
-      } finally {
-        session.isRequestActive = false;
-        setIsStreaming(false);
-        setLiveThought('');
-        setLiveText('');
+        if (chunk.thoughtText) {
+          accThought += chunk.thoughtText;
+          setLiveThought(accThought);
+        }
+        if (chunk.text) {
+          accText += chunk.text;
+          setLiveText(accText);
+        }
       }
+
+      session.history.push({
+        role: 'model',
+        parts:
+          collectedParts.length > 0
+            ? collectedParts
+            : [{ text: accText }],
+      });
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random()}-m`,
+          role: 'model',
+          text: accText || '(sin respuesta de texto)',
+          thoughtText: accThought || undefined,
+        },
+      ]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addSystemMessage(`✗ Error: ${msg}`);
+    }
+  };
+
+  const startOrEnqueuePrompt = (userPrompt: string) => {
+    const session = sessionRef.current;
+
+    // Si ya hay una petición activa, el mensaje entra a la fila (Queue) en orden FIFO
+    if (session.isRequestActive) {
+      queueRef.current.push(userPrompt);
+      syncQueueState();
+      return;
+    }
+
+    void (async () => {
+      await runSinglePromptNow(userPrompt);
+      while (queueRef.current.length > 0) {
+        const nextPrompt = queueRef.current.shift()!;
+        setEditingQueueIdx((currIdx) => {
+          if (currIdx === null) return null;
+          return currIdx > 0 ? currIdx - 1 : null;
+        });
+        syncQueueState();
+        await runSinglePromptNow(nextPrompt);
+      }
+      session.isRequestActive = false;
+      setIsStreaming(false);
+      setLiveThought('');
+      setLiveText('');
     })();
   };
 
@@ -234,14 +298,23 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     if (trimmed === '/help' || trimmed === '?') {
       addSystemMessage(
         [
-          'Comandos de Glitch CLI:',
+          'Comandos dentro de Glitch CLI:',
           '  /auth                     Selector de conexión (Vertex AI ADC / API personalizada)',
-          '  /model [id]               Selector de modelos disponibles (bloqueado durante petición activa)',
-          '  /effort [low|medium|high] Cambiar o consultar el nivel de effort en vivo',
-          '  /settings                 Panel interactivo de Modo, Sub-modo, Effort y Thoughts',
+          '  /model [id]               Selector de modelos por páginas (←/→ familia, ↑/↓ modelo)',
+          '  /effort [low|medium|high] Cambiar o consultar el nivel de esfuerzo en vivo',
+          '  /settings                 Panel interactivo (Modo, Sub-Modo, Esfuerzo, Thoughts, Aviso --DAA)',
           '  /help                     Mostrar esta ayuda',
           '  /exit                     Salir de Glitch CLI',
-          '  Shift+Tab / Alt+P         Alternar Sub-modo Plan <-> Agent en vivo',
+          '',
+          'Ramas de ejecución al iniciar en terminal:',
+          '  glitch --DAA                        Iniciar en modo Always Allow sin sandbox (acceso total al PC)',
+          '  glitch --dangerously-always-allow   Equivalente a --DAA',
+          '  glitch --model gemini-2.5-flash     Iniciar directamente con un modelo específico',
+          '  glitch -m "gemini-2.5-flash"        Forma corta para elegir modelo al iniciar',
+          '',
+          'Atajos y Fila de Espera (Queue):',
+          '  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agent en vivo',
+          '  ↑ / ↓ con cola activa     Subir/bajar entre los prompts en fila (Queue) y Enter para reemplazar en su misma posición',
         ].join(os.EOL),
       );
       return;
@@ -335,11 +408,15 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    startStreamingPrompt(trimmed);
+    startOrEnqueuePrompt(trimmed);
   };
 
   useInput((input, key) => {
-    // Atajo global en vivo: Shift+Tab o Alt+P alterna Sub-modo Plan <-> Agent
+    if (daaSplashSeconds > 0) {
+      return;
+    }
+
+    // Atajo global en vivo: Shift+Tab o Alt+P alterna Sub-Modo Plan <-> Agent
     if ((key.tab && key.shift) || (key.meta && input.toLowerCase() === 'p')) {
       const nextSubMode: SubMode = toggleSubMode(
         sessionRef.current.settings.subMode,
@@ -350,7 +427,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       };
       syncSettings(updated);
       addSystemMessage(
-        `⇄ Sub-modo cambiado en vivo a: ${nextSubMode === 'plan' ? 'Plan (solo planear)' : 'Agent (modificación activa)'}`,
+        `⇄ Sub-Modo cambiado en vivo a: ${nextSubMode === 'plan' ? 'Plan (solo planear)' : 'Agent (modificación activa)'}`,
       );
       return;
     }
@@ -413,7 +490,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         return;
       }
 
-      // Pasos de texto en /auth
       if (key.return) {
         const val = authBuffer.trim();
         if (authStep === 'vertex_project') {
@@ -529,7 +605,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           };
           syncSettings(updated);
           addSystemMessage(
-            `✓ Modelo seleccionado: ${picked.name} | ${picked.id} (${picked.supportedEfforts.length > 0 ? `effort: ${updated.effort.toUpperCase()}` : 'effort: N/A'})`,
+            `✓ Modelo seleccionado: ${picked.name} | ${picked.id} (${picked.supportedEfforts.length > 0 ? `Esfuerzo: ${updated.effort.toUpperCase()}` : 'Esfuerzo: N/A'})`,
           );
         }
         setActiveDialog('none');
@@ -538,18 +614,18 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    // Manejo del diálogo /settings
+    // Manejo del diálogo /settings (5 opciones)
     if (activeDialog === 'settings') {
       if (key.escape) {
         setActiveDialog('none');
         return;
       }
       if (key.upArrow) {
-        setDialogCursor((prev) => (prev > 0 ? prev - 1 : 3));
+        setDialogCursor((prev) => (prev > 0 ? prev - 1 : 4));
         return;
       }
       if (key.downArrow) {
-        setDialogCursor((prev) => (prev < 3 ? prev + 1 : 0));
+        setDialogCursor((prev) => (prev < 4 ? prev + 1 : 0));
         return;
       }
       if (key.return || key.leftArrow || key.rightArrow) {
@@ -572,13 +648,15 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           syncSettings({ ...cur, effort: nextEffort });
         } else if (dialogCursor === 3) {
           syncSettings({ ...cur, thoughts: !cur.thoughts });
+        } else if (dialogCursor === 4) {
+          syncSettings({ ...cur, hideDaaWarning: !cur.hideDaaWarning });
         }
         return;
       }
       return;
     }
 
-    // Manejo del Composer principal
+    // Autocompletado de Slash Commands cuando se escribe /
     if (matchingSlash.length > 0) {
       if (key.upArrow) {
         setSuggestionIdx((prev) =>
@@ -602,7 +680,60 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       }
     }
 
+    // Navegación con ↑ / ↓ sobre la fila de prompts en cola (Queue)
+    if (matchingSlash.length === 0 && queueRef.current.length > 0) {
+      if (key.upArrow) {
+        const q = queueRef.current;
+        if (editingQueueIdx === null) {
+          draftInputRef.current = inputText;
+          const targetIdx = q.length - 1;
+          setEditingQueueIdx(targetIdx);
+          setInputText(q[targetIdx] ?? '');
+        } else if (editingQueueIdx > 0) {
+          const targetIdx = editingQueueIdx - 1;
+          setEditingQueueIdx(targetIdx);
+          setInputText(q[targetIdx] ?? '');
+        }
+        return;
+      }
+      if (key.downArrow && editingQueueIdx !== null) {
+        const q = queueRef.current;
+        if (editingQueueIdx < q.length - 1) {
+          const targetIdx = editingQueueIdx + 1;
+          setEditingQueueIdx(targetIdx);
+          setInputText(q[targetIdx] ?? '');
+        } else {
+          setEditingQueueIdx(null);
+          setInputText(draftInputRef.current);
+        }
+        return;
+      }
+      if (key.escape && editingQueueIdx !== null) {
+        setEditingQueueIdx(null);
+        setInputText(draftInputRef.current);
+        return;
+      }
+    }
+
     if (key.return) {
+      // Si estamos editando un prompt de la cola (ej. subimos 2 veces al #2 de 3), se actualiza en esa MISMA posición de la fila
+      if (
+        editingQueueIdx !== null &&
+        editingQueueIdx >= 0 &&
+        editingQueueIdx < queueRef.current.length &&
+        !inputText.trim().startsWith('/')
+      ) {
+        const replacement = inputText.trim();
+        if (replacement) {
+          queueRef.current[editingQueueIdx] = replacement;
+          syncQueueState();
+        }
+        setEditingQueueIdx(null);
+        setInputText(draftInputRef.current);
+        draftInputRef.current = '';
+        return;
+      }
+
       if (
         matchingSlash.length > 0 &&
         inputText.trim() !== matchingSlash[suggestionIdx]?.cmd &&
@@ -618,6 +749,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       }
       const toRun = inputText;
       setInputText('');
+      setEditingQueueIdx(null);
       setSuggestionIdx(0);
       executeInputCommand(toRun);
       return;
@@ -634,6 +766,43 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       setSuggestionIdx(0);
     }
   });
+
+  // TUI de peligro de 3 segundos para --DAA (--dangerously-always-allow)
+  if (daaSplashSeconds > 0) {
+    return (
+      <Box
+        flexDirection="column"
+        borderStyle="double"
+        borderColor="red"
+        paddingX={3}
+        paddingY={1}
+        margin={1}
+      >
+        <Text bold color="red">
+          ⚠ ADVERTENCIA DE SEGURIDAD: MODO --DAA (--dangerously-always-allow) ACTIVO
+        </Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text color="yellow">
+            • Glitch CLI se está ejecutando en modo Always Allow y SIN SANDBOX.
+          </Text>
+          <Text color="yellow">
+            • Tiene acceso completo a todo tu PC sin importar desde qué carpeta lo abras (Downloads, System32, etc.).
+          </Text>
+          <Text color="yellow">
+            • Ninguna acción o modificación pedirá confirmación manual mientras este modo esté activo.
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color="white" bold>
+            Iniciando Glitch CLI en {daaSplashSeconds} segundos...
+          </Text>
+        </Box>
+        <Text color="gray">
+          (Puedes desactivar esta advertencia inicial en /settings → Advertencia --DAA al inicio: OFF)
+        </Text>
+      </Box>
+    );
+  }
 
   const artWidth = GLITCH_ASCII_LINES[0]?.length ?? 80;
   const artPad = ' '.repeat(Math.max(0, Math.floor((columns - artWidth) / 2)));
@@ -710,7 +879,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       {/* Respuesta en vivo (Streaming) */}
       {isStreaming && (
         <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
-          <Text color="cyan">⚡ Generando respuesta en vivo... (puedes usar /effort o Shift+Tab sin bloquear)</Text>
+          <Text color="cyan">
+            ⚡ Generando respuesta en vivo... (envía más mensajes a la fila o usa /effort y Shift+Tab)
+          </Text>
           {liveThought && settings.thoughts && (
             <Box borderStyle="single" borderColor="gray" paddingX={1}>
               <Text color="gray" italic>
@@ -719,6 +890,34 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             </Box>
           )}
           {liveText && <Text color="white">{liveText}</Text>}
+        </Box>
+      )}
+
+      {/* Fila de espera (Queue FIFO) visible con soporte de edición ↑ / ↓ */}
+      {queuedPrompts.length > 0 && activeDialog === 'none' && (
+        <Box
+          flexDirection="column"
+          borderStyle="single"
+          borderColor="yellow"
+          paddingX={1}
+          marginBottom={0}
+        >
+          <Text color="yellow" bold>
+            ⏳ En fila de espera ({queuedPrompts.length}) — usa ↑/↓ para elegir y Enter para editar en su misma posición:
+          </Text>
+          {queuedPrompts.map((qp, idx) => {
+            const isEditingThis = editingQueueIdx === idx;
+            return (
+              <Text
+                key={idx}
+                color={isEditingThis ? 'cyan' : 'white'}
+                bold={isEditingThis}
+              >
+                {isEditingThis ? '✎ ' : '  '}#{idx + 1}: {qp}
+                {isEditingThis ? ' (editando en esta posición)' : ''}
+              </Text>
+            );
+          })}
         </Box>
       )}
 
@@ -750,19 +949,28 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           {authStep === 'vertex_project' && (
             <Box flexDirection="column" marginTop={1}>
               <Text>Proyecto GCP (GOOGLE_CLOUD_PROJECT):</Text>
-              <Text color="cyan">{'› '}{authBuffer}█</Text>
+              <Text color="cyan">
+                {'› '}
+                {authBuffer}█
+              </Text>
             </Box>
           )}
           {authStep === 'vertex_location' && (
             <Box flexDirection="column" marginTop={1}>
               <Text>Región GCP (GOOGLE_CLOUD_LOCATION):</Text>
-              <Text color="cyan">{'› '}{authBuffer}█</Text>
+              <Text color="cyan">
+                {'› '}
+                {authBuffer}█
+              </Text>
             </Box>
           )}
           {authStep === 'custom_url' && (
             <Box flexDirection="column" marginTop={1}>
               <Text>Base URL del proveedor personalizado:</Text>
-              <Text color="cyan">{'› '}{authBuffer}█</Text>
+              <Text color="cyan">
+                {'› '}
+                {authBuffer}█
+              </Text>
             </Box>
           )}
           {authStep === 'custom_key' && (
@@ -798,7 +1006,11 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           paddingY={1}
           marginBottom={1}
         >
-          <Box flexDirection="row" justifyContent="space-between" marginBottom={1}>
+          <Box
+            flexDirection="row"
+            justifyContent="space-between"
+            marginBottom={1}
+          >
             <Text bold color="cyan">
               Selector de Modelos (/model)
             </Text>
@@ -807,7 +1019,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             </Text>
           </Box>
 
-          {/* Pestañas de familias (Página 1: Gemini | Página 2: Gemma | Página 3: Nano Banana & Imagen) */}
+          {/* Pestañas de familias */}
           <Box flexDirection="row" marginBottom={1}>
             <Text color="cyan" bold>
               {'◄ '}
@@ -886,16 +1098,26 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             Panel de Preferencias (/settings) — ↑/↓ seleccionar, Enter/←/→ cambiar, Esc cerrar
           </Text>
           <Text color={dialogCursor === 0 ? 'cyan' : 'white'}>
-            {dialogCursor === 0 ? '❯ ' : '  '}Modo de permisos   : {settings.permissionMode}
+            {dialogCursor === 0 ? '❯ ' : '  '}Modo de permisos            :{' '}
+            {formatPermissionModeLabel(settings.permissionMode)}
           </Text>
           <Text color={dialogCursor === 1 ? 'cyan' : 'white'}>
-            {dialogCursor === 1 ? '❯ ' : '  '}Sub-modo           : {settings.subMode === 'plan' ? 'Plan (solo planear)' : 'Agent (modificar)'}
+            {dialogCursor === 1 ? '❯ ' : '  '}Sub-Modo                    :{' '}
+            {settings.subMode === 'plan'
+              ? 'Plan (solo planear)'
+              : 'Agent (modificar)'}
           </Text>
           <Text color={dialogCursor === 2 ? 'cyan' : 'white'}>
-            {dialogCursor === 2 ? '❯ ' : '  '}Effort por defecto : {settings.effort.toUpperCase()}
+            {dialogCursor === 2 ? '❯ ' : '  '}Esfuerzo por defecto        :{' '}
+            {settings.effort.toUpperCase()}
           </Text>
           <Text color={dialogCursor === 3 ? 'cyan' : 'white'}>
-            {dialogCursor === 3 ? '❯ ' : '  '}Thoughts           : {settings.thoughts ? 'ON' : 'OFF'}
+            {dialogCursor === 3 ? '❯ ' : '  '}Thoughts                    :{' '}
+            {settings.thoughts ? 'ON' : 'OFF'}
+          </Text>
+          <Text color={dialogCursor === 4 ? 'cyan' : 'white'}>
+            {dialogCursor === 4 ? '❯ ' : '  '}Advertencia --DAA al inicio :{' '}
+            {settings.hideDaaWarning ? 'OFF' : 'ON'}
           </Text>
         </Box>
       )}
@@ -922,9 +1144,15 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
       {/* Caja de entrada estilo Gemini CLI / Codex CLI */}
       {activeDialog === 'none' && (
-        <Box borderStyle="round" borderColor="gray" paddingX={1}>
-          <Text color="cyan" bold>
-            {'› '}
+        <Box
+          borderStyle="round"
+          borderColor={editingQueueIdx !== null ? 'yellow' : 'gray'}
+          paddingX={1}
+        >
+          <Text color={editingQueueIdx !== null ? 'yellow' : 'cyan'} bold>
+            {editingQueueIdx !== null
+              ? `[Editando Cola #${editingQueueIdx + 1}] › `
+              : '› '}
           </Text>
           {inputText.length > 0 ? (
             <Text color="white">{inputText}█</Text>
@@ -936,7 +1164,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         </Box>
       )}
 
-      {/* Barra de estado inferior estilo Gemini CLI / Codex CLI */}
+      {/* Barra de estado inferior sin corchetes y con nombre físico del modelo */}
       <Box
         flexDirection="row"
         justifyContent="space-between"
