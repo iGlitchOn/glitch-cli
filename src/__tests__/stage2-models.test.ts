@@ -17,7 +17,11 @@ import {
 import { DEFAULT_SETTINGS, type GlitchSettings } from '../config/settings.js';
 import { runModelCommand } from '../commands/model.js';
 import { runEffortCommand } from '../commands/effort.js';
-import { formatStatusBar } from '../ui/statusBar.js';
+import {
+  formatInputTopLeftMode,
+  formatInputTopRightInfo,
+  formatStatusBar,
+} from '../ui/statusBar.js';
 
 describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
   let tempHome: string;
@@ -176,20 +180,25 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     expect(withEffortArg.effort).toBe('high');
   });
 
-  it('renderiza la barra de estado sin corchetes y con el nombre físico del modelo, Esfuerzo, Modo y Sub-Modo', () => {
+  it('renderiza la barra inferior con el nombre físico del modelo y Esfuerzo, y la barra superior del chat con Modo/Sub-Modo y % de contexto/MCP/skills', () => {
     const bar = formatStatusBar(baseSettings);
-    expect(bar).toBe(
-      'Modelo: Gemini 4 Argon | Esfuerzo: MEDIUM | Modo: Always Allow | Sub-Modo: Agent',
-    );
+    expect(bar).toBe('Modelo: Gemini 4 Argon | Esfuerzo: MEDIUM');
+
+    const topLeft = formatInputTopLeftMode({
+      ...baseSettings,
+      subMode: 'plan',
+    });
+    expect(topLeft).toBe('Always Allow · Sub-Modo: Plan (Shift+Tab)');
+
+    const topRight = formatInputTopRightInfo([], 3, 73);
+    expect(topRight).toBe('100% contexto restante · 3 MCP activos · 73 skills');
 
     const noEffortBar = formatStatusBar({
       ...baseSettings,
       model: 'gemma-3-27b-it',
       subMode: 'plan',
     });
-    expect(noEffortBar).toBe(
-      'Modelo: Gemma 3 27B IT | Esfuerzo: N/A | Modo: Always Allow | Sub-Modo: Plan',
-    );
+    expect(noEffortBar).toBe('Modelo: Gemma 3 27B IT | Esfuerzo: N/A');
   });
 
   it('separa los modelos en páginas limpias (Gemini, Gemma, Nano Banana, Embeddings), ordenados por fecha descendente y formatea NOMBRE (active) | ID | FECHA | ESFUERZO (LOW - MEDIUM - HIGH)', () => {

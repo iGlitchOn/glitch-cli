@@ -35,7 +35,12 @@ import {
   IGLITCHOFF_WORDMARK,
   formatShortCwd,
 } from './banner.js';
-import { formatStatusBar } from './statusBar.js';
+import {
+  detectEnvironmentCounts,
+  formatInputTopLeftMode,
+  formatInputTopRightInfo,
+  formatStatusBar,
+} from './statusBar.js';
 import { SessionState } from '../core/session.js';
 import {
   createSessionId,
@@ -68,10 +73,12 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const { exit } = useApp();
   useStdout();
   const columns = process.stdout.columns ?? 100;
+  const rows = process.stdout.rows ?? 30;
 
   const sessionRef = useRef<SessionState>(new SessionState(initialSettings));
   const [sessionId, setSessionId] = useState<string>(() => createSessionId());
   const sessionCreatedAtRef = useRef<string>(new Date().toISOString());
+  const [envCounts] = useState(() => detectEnvironmentCounts());
 
   const [settings, setSettings] = useState<GlitchSettings>(initialSettings);
   const [availableModels, setAvailableModels] = useState(
@@ -79,7 +86,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   );
 
   // El aviso TUI de 3 segundos SOLO se muestra si se pasó la flag explícita (--DAA / --dangerously-always-allow)
-  // y no está desactivado en /settings. Si Always Allow ya estaba guardado de antes sin la flag, no molesta.
   const shouldShowDaaSplash =
     launchedWithDaaFlag && !initialSettings.hideDaaWarning;
   const [daaSplashSeconds, setDaaSplashSeconds] = useState<number>(
@@ -122,7 +128,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   );
   const [tempKey, setTempKey] = useState('');
 
-  // Estado de diálogos /model (incluyendo sub-paso de esfuerzo), /settings y /resume
+  // Estado de diálogos /model, /settings y /resume
   const [dialogCursor, setDialogCursor] = useState(0);
   const [modelPageIdx, setModelPageIdx] = useState(0);
   const [pendingModelForEffort, setPendingModelForEffort] =
@@ -182,7 +188,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
   };
 
-  // Temporizador de 3 segundos para la pantalla de advertencia --DAA (solo cuando se pasó la flag explícita)
   useEffect(() => {
     if (daaSplashSeconds <= 0) return;
     const timer = setTimeout(() => {
@@ -204,7 +209,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
   }, []);
 
-  // Busca tanto por el nombre del comando como por sus alternativas (ej. /clear o /cl -> muestra /new)
   const matchingSlash =
     activeDialog === 'none' ? matchSlashCommands(inputText) : [];
 
@@ -328,30 +332,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
     if (resolved === '/help' || resolved === '?') {
       setShowShortcutsPanel((prev) => !prev);
-      addSystemMessage(
-        [
-          'Comandos dentro de Glitch CLI:',
-          '  /new                      Iniciar conversación limpia (alternativas: /clear, /cls, /reset)',
-          '  /resume [num|id]          Retomar conversación guardada (alternativas: /continue, /history)',
-          '  /model [id] [effort]      Seleccionar modelo y esfuerzo (ej. /model gemini-4-argon high)',
-          '  /effort [low|medium|high] Cambiar o consultar el nivel de esfuerzo en vivo',
-          '  /settings                 Panel interactivo (Modo, Sub-Modo, Esfuerzo, Thoughts, Aviso --DAA)',
-          '  /auth                     Selector de conexión (Vertex AI ADC / API personalizada)',
-          '  /help                     Mostrar esta ayuda',
-          '  /exit                     Salir de Glitch CLI',
-          '',
-          'Ramas de ejecución al iniciar en terminal:',
-          '  glitch --DAA                        Iniciar forzando Always Allow sin sandbox (con aviso TUI de 3s)',
-          '  glitch --dangerously-always-allow   Equivalente a --DAA',
-          '  glitch --model gemini-2.5-flash     Iniciar directamente con un modelo específico',
-          '  glitch -m "gemini-2.5-flash"        Forma corta para elegir modelo al iniciar',
-          '',
-          'Atajos y Fila de Espera (Queue):',
-          '  ? (con barra vacía)       Mostrar/ocultar panel de atajos al instante',
-          '  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agent en vivo',
-          '  ↑ / ↓ con cola activa     Subir/bajar entre los prompts en fila (Queue) y Enter para reemplazar en su misma posición',
-        ].join(os.EOL),
-      );
       return;
     }
 
@@ -535,9 +515,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         subMode: nextSubMode,
       };
       syncSettings(updated);
-      addSystemMessage(
-        `⇄ Sub-Modo cambiado en vivo a: ${nextSubMode === 'plan' ? 'Plan (solo planear)' : 'Agent (modificación activa)'}`,
-      );
       return;
     }
 
@@ -711,7 +688,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
 
     // Manejo del diálogo /model (con paginación ← / → y selección de esfuerzo integrada)
     if (activeDialog === 'model') {
-      // Sub-paso: elegir Esfuerzo para el modelo seleccionado
       if (pendingModelForEffort) {
         const efforts = pendingModelForEffort.supportedEfforts;
         if (key.escape) {
@@ -794,7 +770,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
         }
         const picked = pageModels[dialogCursor];
         if (picked) {
-          // Si el modelo soporta varios niveles de esfuerzo, permite elegir el effort ahí mismo
           if (picked.supportedEfforts.length > 1) {
             const defaultEffort =
               picked.supportedEfforts.includes(settings.effort)
@@ -829,7 +804,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return;
     }
 
-    // Manejo del diálogo /settings (5 opciones)
+    // Manejo del diálogo /settings
     if (activeDialog === 'settings') {
       if (key.escape) {
         setActiveDialog('none');
@@ -982,7 +957,6 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     }
   });
 
-  // TUI de peligro de 3 segundos (solo cuando se inició con la flag explícita --DAA / --dangerously-always-allow)
   if (daaSplashSeconds > 0) {
     return (
       <Box
@@ -1022,469 +996,529 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const artWidth = GLITCH_ASCII_LINES[0]?.length ?? 80;
   const artPad = ' '.repeat(Math.max(0, Math.floor((columns - artWidth) / 2)));
 
+  // Calcula numeración Mensaje N > y Respuesta N >
+  let userTurnCounter = 0;
+  let modelTurnCounter = 0;
+  const numberedMessages = messages.map((m) => {
+    if (m.role === 'user') {
+      userTurnCounter++;
+      return { ...m, turnNumber: userTurnCounter };
+    }
+    if (m.role === 'model') {
+      modelTurnCounter++;
+      return { ...m, turnNumber: modelTurnCounter };
+    }
+    return { ...m, turnNumber: 0 };
+  });
+  const nextStreamingReplyNumber = modelTurnCounter + 1;
+
+  const modeColor =
+    settings.permissionMode === 'always_allow'
+      ? 'redBright'
+      : settings.permissionMode === 'ask_insecure'
+        ? 'yellow'
+        : 'cyan';
+
   return (
-    <Box flexDirection="column" paddingX={1}>
-      {/* Cabecera estilo Codex CLI + iGlitchOff */}
-      <Box flexDirection="column" marginBottom={1}>
-        <Box flexDirection="row" justifyContent="space-between">
-          <Box flexDirection="column">
-            <Box>
-              <Text bold color="white">
-                {'>_ Glitch CLI '}
-              </Text>
-              <Text color="gray">(v{version})</Text>
+    <Box
+      flexDirection="column"
+      minHeight={Math.max(22, rows - 1)}
+      justifyContent="space-between"
+      paddingX={1}
+    >
+      {/* ZONA SUPERIOR: Cabecera + Respuestas del Modelo + Diálogos */}
+      <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" marginBottom={1}>
+          <Box flexDirection="row" justifyContent="space-between">
+            <Box flexDirection="column">
+              <Box>
+                <Text bold color="white">
+                  {'>_ Glitch CLI '}
+                </Text>
+                <Text color="gray">(v{version})</Text>
+              </Box>
+              <Text color="gray">   {formatShortCwd()}</Text>
             </Box>
-            <Text color="gray">   {formatShortCwd()}</Text>
+            <Box>
+              <Text color="cyan">{IGLITCHOFF_WORDMARK}</Text>
+            </Box>
           </Box>
-          <Box>
-            <Text color="cyan">{IGLITCHOFF_WORDMARK}</Text>
-          </Box>
+
+          {messages.length === 0 && activeDialog === 'none' && (
+            <Box flexDirection="column" marginTop={1}>
+              {GLITCH_ASCII_LINES.map((line, i) => (
+                <Text key={i} color="gray">
+                  {artPad}
+                  {line}
+                </Text>
+              ))}
+            </Box>
+          )}
         </Box>
 
-        {messages.length === 0 && activeDialog === 'none' && (
-          <Box flexDirection="column" marginTop={1}>
-            {GLITCH_ASCII_LINES.map((line, i) => (
-              <Text key={i} color="gray">
-                {artPad}
-                {line}
+        {/* Historial numerado: Mensaje N > y Respuesta N > */}
+        {numberedMessages.map((m) => (
+          <Box key={m.id} flexDirection="column" marginBottom={1}>
+            {m.role === 'user' && (
+              <Box>
+                <Text color="cyan" bold>
+                  {`Mensaje ${m.turnNumber} > `}
+                </Text>
+                <Text color="white" bold>
+                  {m.text}
+                </Text>
+              </Box>
+            )}
+            {m.role === 'model' && (
+              <Box flexDirection="column">
+                {m.thoughtText && settings.thoughts && (
+                  <Box
+                    borderStyle="single"
+                    borderColor="gray"
+                    paddingX={1}
+                    marginBottom={1}
+                  >
+                    <Text color="gray" italic>
+                      💭 {m.thoughtText}
+                    </Text>
+                  </Box>
+                )}
+                <Box>
+                  <Text color="green" bold>
+                    {`Respuesta ${m.turnNumber} > `}
+                  </Text>
+                  <Text color="white">{m.text}</Text>
+                </Box>
+              </Box>
+            )}
+            {m.role === 'system' && (
+              <Box>
+                <Text color="yellow">{m.text}</Text>
+              </Box>
+            )}
+          </Box>
+        ))}
+
+        {/* Respuesta en vivo numerada (Streaming) */}
+        {isStreaming && (
+          <Box flexDirection="column" marginBottom={1}>
+            <Text color="cyan">
+              ⚡ Generando Respuesta {nextStreamingReplyNumber}... (envía más mensajes a la fila o usa /effort y Shift+Tab)
+            </Text>
+            {liveThought && settings.thoughts && (
+              <Box borderStyle="single" borderColor="gray" paddingX={1}>
+                <Text color="gray" italic>
+                  💭 {liveThought}
+                </Text>
+              </Box>
+            )}
+            {liveText && (
+              <Box>
+                <Text color="green" bold>
+                  {`Respuesta ${nextStreamingReplyNumber} > `}
+                </Text>
+                <Text color="white">{liveText}</Text>
+              </Box>
+            )}
+          </Box>
+        )}
+
+        {/* Diálogo interactivo /resume */}
+        {activeDialog === 'resume' && (
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="cyan"
+            paddingX={2}
+            paddingY={1}
+            marginBottom={1}
+          >
+            <Text bold color="cyan">
+              Retomar Conversación (/resume) — ↑/↓ para elegir, Enter cargar, Esc salir
+            </Text>
+            {savedSessionsList.map((s, idx) => {
+              const isSelected = idx === dialogCursor;
+              return (
+                <Text key={s.id} color={isSelected ? 'cyan' : 'white'}>
+                  {isSelected ? '❯ ' : '  '}
+                  {s.title.padEnd(48, ' ')} | {s.model.padEnd(24, ' ')} |{' '}
+                  {s.updatedAt} ({s.history.length} turnos)
+                </Text>
+              );
+            })}
+          </Box>
+        )}
+
+        {/* Diálogo interactivo /auth */}
+        {activeDialog === 'auth' && (
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="cyan"
+            paddingX={2}
+            paddingY={1}
+            marginBottom={1}
+          >
+            <Text bold color="cyan">
+              Configuración de Autenticación (/auth)
+            </Text>
+            <Text color="gray">Actual: {formatAuthSummary(settings)}</Text>
+            {authStep === 'provider' && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text>Selecciona proveedor (↑/↓ y Enter):</Text>
+                <Text color={authChoiceIdx === 0 ? 'cyan' : 'white'}>
+                  {authChoiceIdx === 0 ? '❯ ' : '  '}1. Vertex AI (Application Default Credentials - Free Trial)
+                </Text>
+                <Text color={authChoiceIdx === 1 ? 'cyan' : 'white'}>
+                  {authChoiceIdx === 1 ? '❯ ' : '  '}2. API personalizada (/v1/chat/completions o /v1/responses)
+                </Text>
+              </Box>
+            )}
+            {authStep === 'vertex_project' && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text>Proyecto GCP (GOOGLE_CLOUD_PROJECT):</Text>
+                <Text color="cyan">
+                  {'› '}
+                  {authBuffer}█
+                </Text>
+              </Box>
+            )}
+            {authStep === 'vertex_location' && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text>Región GCP (GOOGLE_CLOUD_LOCATION):</Text>
+                <Text color="cyan">
+                  {'› '}
+                  {authBuffer}█
+                </Text>
+              </Box>
+            )}
+            {authStep === 'custom_url' && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text>Base URL del proveedor personalizado:</Text>
+                <Text color="cyan">
+                  {'› '}
+                  {authBuffer}█
+                </Text>
+              </Box>
+            )}
+            {authStep === 'custom_key' && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text>API Key (se mostrará y guardará enmascarada):</Text>
+                <Text color="cyan">
+                  {'› '}
+                  {authBuffer ? '*'.repeat(Math.min(authBuffer.length, 24)) : ''}█
+                </Text>
+              </Box>
+            )}
+            {authStep === 'custom_format' && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text>Selecciona el formato del endpoint (↑/↓ y Enter):</Text>
+                <Text color={authChoiceIdx === 0 ? 'cyan' : 'white'}>
+                  {authChoiceIdx === 0 ? '❯ ' : '  '}1. /v1/chat/completions
+                </Text>
+                <Text color={authChoiceIdx === 1 ? 'cyan' : 'white'}>
+                  {authChoiceIdx === 1 ? '❯ ' : '  '}2. /v1/responses
+                </Text>
+              </Box>
+            )}
+          </Box>
+        )}
+
+        {/* Diálogo interactivo /model */}
+        {activeDialog === 'model' && (
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="cyan"
+            paddingX={2}
+            paddingY={1}
+            marginBottom={1}
+          >
+            <Box
+              flexDirection="row"
+              justifyContent="space-between"
+              marginBottom={1}
+            >
+              <Text bold color="cyan">
+                Selector de Modelos (/model)
               </Text>
-            ))}
+              <Text color="gray">
+                ←/→ cambiar familia · ↑/↓ elegir · Enter confirmar · Esc salir
+              </Text>
+            </Box>
+
+            {pendingModelForEffort ? (
+              <Box flexDirection="column" marginTop={1}>
+                <Text bold color="white">
+                  Selecciona el nivel de ESFUERZO para {pendingModelForEffort.name}{' '}
+                  (←/→ y Enter, Esc volver):
+                </Text>
+                <Box flexDirection="row" marginTop={1}>
+                  {pendingModelForEffort.supportedEfforts.map((ef, idx) => {
+                    const isChosen = idx === modelEffortIdx;
+                    return (
+                      <Box key={ef} marginRight={3}>
+                        <Text
+                          bold={isChosen}
+                          color={isChosen ? 'cyan' : 'white'}
+                        >
+                          {isChosen
+                            ? `❯ [${ef.toUpperCase()}]`
+                            : `  ${ef.toUpperCase()}`}
+                        </Text>
+                      </Box>
+                    );
+                  })}
+                </Box>
+              </Box>
+            ) : (
+              <>
+                <Box flexDirection="row" marginBottom={1}>
+                  <Text color="cyan" bold>
+                    {'◄ '}
+                  </Text>
+                  {modelPages.map((page, pIdx) => {
+                    const isCurrentPage = pIdx === modelPageIdx;
+                    return (
+                      <Box key={page.family} marginRight={2}>
+                        <Text
+                          bold={isCurrentPage}
+                          color={isCurrentPage ? 'cyan' : 'gray'}
+                        >
+                          {`[Pág ${pIdx + 1}/${modelPages.length}: ${page.title}]`}
+                        </Text>
+                      </Box>
+                    );
+                  })}
+                  <Text color="cyan" bold>
+                    {'►'}
+                  </Text>
+                </Box>
+
+                <Box flexDirection="column" marginBottom={1}>
+                  <Text bold color="white">
+                    {'  '}
+                    {'NOMBRE DEL MODELO'.padEnd(36, ' ')}
+                    {' | '}
+                    {'ID MODELO'.padEnd(32, ' ')}
+                    {' | '}
+                    {'FECHA'.padEnd(10, ' ')}
+                    {' | '}
+                    {'ESFUERZO'}
+                  </Text>
+                  <Text color="gray">{'  ' + '─'.repeat(104)}</Text>
+                </Box>
+
+                {(modelPages[modelPageIdx]?.models ?? []).map((m, idx) => {
+                  const isSelected = idx === dialogCursor;
+                  const isCurrent = m.id === settings.model;
+                  const cols = formatModelRowColumns(m, isCurrent, 36, 32, 10);
+                  return (
+                    <Box key={m.id} flexDirection="row">
+                      <Text
+                        color={isSelected ? 'cyan' : 'white'}
+                        bold={isSelected}
+                      >
+                        {isSelected ? '❯ ' : '  '}
+                        {cols.nameCol}
+                      </Text>
+                      <Text color="gray">{' | '}</Text>
+                      <Text color={isSelected ? 'cyan' : 'gray'}>
+                        {cols.idCol}
+                      </Text>
+                      <Text color="gray">{' | '}</Text>
+                      <Text color={isSelected ? 'cyan' : 'green'}>
+                        {cols.dateCol}
+                      </Text>
+                      <Text color="gray">{' | '}</Text>
+                      <Text color={isSelected ? 'cyan' : 'yellow'}>
+                        {cols.effortsCol}
+                      </Text>
+                    </Box>
+                  );
+                })}
+              </>
+            )}
+          </Box>
+        )}
+
+        {/* Diálogo interactivo /settings */}
+        {activeDialog === 'settings' && (
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="cyan"
+            paddingX={2}
+            paddingY={1}
+            marginBottom={1}
+          >
+            <Text bold color="cyan">
+              Panel de Preferencias (/settings) — ↑/↓ seleccionar, Enter/←/→ cambiar, Esc cerrar
+            </Text>
+            <Text color={dialogCursor === 0 ? 'cyan' : 'white'}>
+              {dialogCursor === 0 ? '❯ ' : '  '}Modo de permisos            :{' '}
+              {formatPermissionModeLabel(settings.permissionMode)}
+            </Text>
+            <Text color={dialogCursor === 1 ? 'cyan' : 'white'}>
+              {dialogCursor === 1 ? '❯ ' : '  '}Sub-Modo                    :{' '}
+              {settings.subMode === 'plan'
+                ? 'Plan (solo planear)'
+                : 'Agent (modificar)'}
+            </Text>
+            <Text color={dialogCursor === 2 ? 'cyan' : 'white'}>
+              {dialogCursor === 2 ? '❯ ' : '  '}Esfuerzo por defecto        :{' '}
+              {settings.effort.toUpperCase()}
+            </Text>
+            <Text color={dialogCursor === 3 ? 'cyan' : 'white'}>
+              {dialogCursor === 3 ? '❯ ' : '  '}Thoughts                    :{' '}
+              {settings.thoughts ? 'ON' : 'OFF'}
+            </Text>
+            <Text color={dialogCursor === 4 ? 'cyan' : 'white'}>
+              {dialogCursor === 4 ? '❯ ' : '  '}Advertencia --DAA al inicio :{' '}
+              {settings.hideDaaWarning ? 'OFF' : 'ON'}
+            </Text>
           </Box>
         )}
       </Box>
 
-      {/* Historial de conversación */}
-      {messages.map((m) => (
-        <Box key={m.id} flexDirection="column" marginBottom={1}>
-          {m.role === 'user' && (
-            <Box>
-              <Text color="cyan" bold>
-                {'› '}
-              </Text>
-              <Text color="white" bold>
-                {m.text}
-              </Text>
-            </Box>
-          )}
-          {m.role === 'model' && (
-            <Box flexDirection="column" paddingLeft={2}>
-              {m.thoughtText && settings.thoughts && (
-                <Box
-                  borderStyle="single"
-                  borderColor="gray"
-                  paddingX={1}
-                  marginBottom={1}
-                >
-                  <Text color="gray" italic>
-                    💭 {m.thoughtText}
-                  </Text>
-                </Box>
-              )}
-              <Text color="white">{m.text}</Text>
-            </Box>
-          )}
-          {m.role === 'system' && (
-            <Box paddingLeft={2}>
-              <Text color="yellow">{m.text}</Text>
-            </Box>
-          )}
-        </Box>
-      ))}
-
-      {/* Respuesta en vivo (Streaming) */}
-      {isStreaming && (
-        <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
-          <Text color="cyan">
-            ⚡ Generando respuesta en vivo... (envía más mensajes a la fila o usa /effort y Shift+Tab)
-          </Text>
-          {liveThought && settings.thoughts && (
-            <Box borderStyle="single" borderColor="gray" paddingX={1}>
-              <Text color="gray" italic>
-                💭 {liveThought}
-              </Text>
-            </Box>
-          )}
-          {liveText && <Text color="white">{liveText}</Text>}
-        </Box>
-      )}
-
-      {/* Panel de atajos instantáneo al presionar ? */}
-      {showShortcutsPanel && activeDialog === 'none' && (
-        <Box
-          flexDirection="column"
-          borderStyle="round"
-          borderColor="cyan"
-          paddingX={2}
-          paddingY={1}
-          marginBottom={1}
-        >
-          <Text bold color="cyan">
-            Atajos y Comandos Rápidos (presiona ? de nuevo para ocultar)
-          </Text>
-          <Text color="white">
-            {'  /new                      Iniciar conversación limpia (alias: /clear, /cls, /reset)'}
-          </Text>
-          <Text color="white">
-            {'  /resume                   Retomar conversación guardada (alias: /continue, /history)'}
-          </Text>
-          <Text color="white">
-            {'  /model [id] [effort]      Cambiar modelo y esfuerzo (ej. /model gemini-4-argon high)'}
-          </Text>
-          <Text color="white">
-            {'  /effort [low|medium|high] Cambiar esfuerzo en vivo sin reiniciar'}
-          </Text>
-          <Text color="white">
-            {'  /settings                 Panel de Modo, Sub-Modo, Esfuerzo, Thoughts y Aviso --DAA'}
-          </Text>
-          <Text color="white">
-            {'  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agent en vivo'}
-          </Text>
-          <Text color="white">
-            {'  ↑ / ↓ con cola activa     Subir/bajar en la fila (Queue) y Enter para editar en esa posición'}
-          </Text>
-          <Text color="gray">
-            {'  Flags CLI: glitch --DAA | glitch --dangerously-always-allow | glitch --model <id> | glitch -m "<id>"'}
-          </Text>
-        </Box>
-      )}
-
-      {/* Fila de espera (Queue FIFO) visible con soporte de edición ↑ / ↓ */}
-      {queuedPrompts.length > 0 && activeDialog === 'none' && (
-        <Box
-          flexDirection="column"
-          borderStyle="single"
-          borderColor="yellow"
-          paddingX={1}
-          marginBottom={0}
-        >
-          <Text color="yellow" bold>
-            ⏳ En fila de espera ({queuedPrompts.length}) — usa ↑/↓ para elegir y Enter para editar en su misma posición:
-          </Text>
-          {queuedPrompts.map((qp, idx) => {
-            const isEditingThis = editingQueueIdx === idx;
-            return (
-              <Text
-                key={idx}
-                color={isEditingThis ? 'cyan' : 'white'}
-                bold={isEditingThis}
-              >
-                {isEditingThis ? '✎ ' : '  '}#{idx + 1}: {qp}
-                {isEditingThis ? ' (editando en esta posición)' : ''}
-              </Text>
-            );
-          })}
-        </Box>
-      )}
-
-      {/* Diálogo interactivo /resume */}
-      {activeDialog === 'resume' && (
-        <Box
-          flexDirection="column"
-          borderStyle="round"
-          borderColor="cyan"
-          paddingX={2}
-          paddingY={1}
-          marginBottom={1}
-        >
-          <Text bold color="cyan">
-            Retomar Conversación (/resume) — ↑/↓ para elegir, Enter cargar, Esc salir
-          </Text>
-          {savedSessionsList.map((s, idx) => {
-            const isSelected = idx === dialogCursor;
-            return (
-              <Text key={s.id} color={isSelected ? 'cyan' : 'white'}>
-                {isSelected ? '❯ ' : '  '}
-                {s.title.padEnd(48, ' ')} | {s.model.padEnd(24, ' ')} |{' '}
-                {s.updatedAt} ({s.history.length} turnos)
-              </Text>
-            );
-          })}
-        </Box>
-      )}
-
-      {/* Diálogo interactivo /auth */}
-      {activeDialog === 'auth' && (
-        <Box
-          flexDirection="column"
-          borderStyle="round"
-          borderColor="cyan"
-          paddingX={2}
-          paddingY={1}
-          marginBottom={1}
-        >
-          <Text bold color="cyan">
-            Configuración de Autenticación (/auth)
-          </Text>
-          <Text color="gray">Actual: {formatAuthSummary(settings)}</Text>
-          {authStep === 'provider' && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text>Selecciona proveedor (↑/↓ y Enter):</Text>
-              <Text color={authChoiceIdx === 0 ? 'cyan' : 'white'}>
-                {authChoiceIdx === 0 ? '❯ ' : '  '}1. Vertex AI (Application Default Credentials - Free Trial)
-              </Text>
-              <Text color={authChoiceIdx === 1 ? 'cyan' : 'white'}>
-                {authChoiceIdx === 1 ? '❯ ' : '  '}2. API personalizada (/v1/chat/completions o /v1/responses)
-              </Text>
-            </Box>
-          )}
-          {authStep === 'vertex_project' && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text>Proyecto GCP (GOOGLE_CLOUD_PROJECT):</Text>
-              <Text color="cyan">
-                {'› '}
-                {authBuffer}█
-              </Text>
-            </Box>
-          )}
-          {authStep === 'vertex_location' && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text>Región GCP (GOOGLE_CLOUD_LOCATION):</Text>
-              <Text color="cyan">
-                {'› '}
-                {authBuffer}█
-              </Text>
-            </Box>
-          )}
-          {authStep === 'custom_url' && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text>Base URL del proveedor personalizado:</Text>
-              <Text color="cyan">
-                {'› '}
-                {authBuffer}█
-              </Text>
-            </Box>
-          )}
-          {authStep === 'custom_key' && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text>API Key (se mostrará y guardará enmascarada):</Text>
-              <Text color="cyan">
-                {'› '}
-                {authBuffer ? '*'.repeat(Math.min(authBuffer.length, 24)) : ''}█
-              </Text>
-            </Box>
-          )}
-          {authStep === 'custom_format' && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text>Selecciona el formato del endpoint (↑/↓ y Enter):</Text>
-              <Text color={authChoiceIdx === 0 ? 'cyan' : 'white'}>
-                {authChoiceIdx === 0 ? '❯ ' : '  '}1. /v1/chat/completions
-              </Text>
-              <Text color={authChoiceIdx === 1 ? 'cyan' : 'white'}>
-                {authChoiceIdx === 1 ? '❯ ' : '  '}2. /v1/responses
-              </Text>
-            </Box>
-          )}
-        </Box>
-      )}
-
-      {/* Diálogo interactivo /model */}
-      {activeDialog === 'model' && (
-        <Box
-          flexDirection="column"
-          borderStyle="round"
-          borderColor="cyan"
-          paddingX={2}
-          paddingY={1}
-          marginBottom={1}
-        >
+      {/* ZONA INFERIOR ANCLADA ABAJO: Panel ? + Cola + Menú Slash + Barra sobre el Chat + Caja de Chat + Pie */}
+      <Box flexDirection="column">
+        {showShortcutsPanel && activeDialog === 'none' && (
           <Box
-            flexDirection="row"
-            justifyContent="space-between"
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="cyan"
+            paddingX={2}
+            paddingY={1}
             marginBottom={1}
           >
             <Text bold color="cyan">
-              Selector de Modelos (/model)
+              Atajos y Comandos Rápidos (presiona ? de nuevo para ocultar)
+            </Text>
+            <Text color="white">
+              {'  /new                      Iniciar conversación limpia'}
+            </Text>
+            <Text color="white">
+              {'  /resume                   Retomar una conversación anterior guardada'}
+            </Text>
+            <Text color="white">
+              {'  /model [id] [effort]      Seleccionar modelo y esfuerzo (ej. /model gemini-4-argon high)'}
+            </Text>
+            <Text color="white">
+              {'  /effort [low|medium|high] Cambiar esfuerzo en vivo sin reiniciar'}
+            </Text>
+            <Text color="white">
+              {'  /settings                 Panel de Modo, Sub-Modo, Esfuerzo, Thoughts y Aviso --DAA'}
+            </Text>
+            <Text color="white">
+              {'  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agent en vivo'}
+            </Text>
+            <Text color="white">
+              {'  ↑ / ↓ con cola activa     Subir/bajar en la fila (Queue) y Enter para editar en esa posición'}
             </Text>
             <Text color="gray">
-              ←/→ cambiar familia · ↑/↓ elegir · Enter confirmar · Esc salir
+              {'  Flags CLI: glitch --DAA | glitch --dangerously-always-allow | glitch --model <id> | glitch -m "<id>"'}
             </Text>
           </Box>
+        )}
 
-          {pendingModelForEffort ? (
-            <Box flexDirection="column" marginTop={1}>
-              <Text bold color="white">
-                Selecciona el nivel de ESFUERZO para {pendingModelForEffort.name}{' '}
-                (←/→ y Enter, Esc volver):
-              </Text>
-              <Box flexDirection="row" marginTop={1}>
-                {pendingModelForEffort.supportedEfforts.map((ef, idx) => {
-                  const isChosen = idx === modelEffortIdx;
-                  return (
-                    <Box key={ef} marginRight={3}>
-                      <Text
-                        bold={isChosen}
-                        color={isChosen ? 'cyan' : 'white'}
-                      >
-                        {isChosen ? `❯ [${ef.toUpperCase()}]` : `  ${ef.toUpperCase()}`}
-                      </Text>
-                    </Box>
-                  );
-                })}
-              </Box>
-            </Box>
-          ) : (
-            <>
-              {/* Pestañas de familias */}
-              <Box flexDirection="row" marginBottom={1}>
-                <Text color="cyan" bold>
-                  {'◄ '}
-                </Text>
-                {modelPages.map((page, pIdx) => {
-                  const isCurrentPage = pIdx === modelPageIdx;
-                  return (
-                    <Box key={page.family} marginRight={2}>
-                      <Text
-                        bold={isCurrentPage}
-                        color={isCurrentPage ? 'cyan' : 'gray'}
-                      >
-                        {`[Pág ${pIdx + 1}/${modelPages.length}: ${page.title}]`}
-                      </Text>
-                    </Box>
-                  );
-                })}
-                <Text color="cyan" bold>
-                  {'►'}
-                </Text>
-              </Box>
-
-              {/* Encabezado de tabla separada */}
-              <Box flexDirection="column" marginBottom={1}>
-                <Text bold color="white">
-                  {'  '}
-                  {'NOMBRE DEL MODELO'.padEnd(36, ' ')}
-                  {' | '}
-                  {'ID MODELO'.padEnd(32, ' ')}
-                  {' | '}
-                  {'FECHA'.padEnd(10, ' ')}
-                  {' | '}
-                  {'ESFUERZO'}
-                </Text>
-                <Text color="gray">{'  ' + '─'.repeat(104)}</Text>
-              </Box>
-
-              {/* Filas de la familia actual (ordenadas de más reciente a más antiguo) */}
-              {(modelPages[modelPageIdx]?.models ?? []).map((m, idx) => {
-                const isSelected = idx === dialogCursor;
-                const isCurrent = m.id === settings.model;
-                const cols = formatModelRowColumns(m, isCurrent, 36, 32, 10);
-                return (
-                  <Box key={m.id} flexDirection="row">
-                    <Text
-                      color={isSelected ? 'cyan' : 'white'}
-                      bold={isSelected}
-                    >
-                      {isSelected ? '❯ ' : '  '}
-                      {cols.nameCol}
-                    </Text>
-                    <Text color="gray">{' | '}</Text>
-                    <Text color={isSelected ? 'cyan' : 'gray'}>
-                      {cols.idCol}
-                    </Text>
-                    <Text color="gray">{' | '}</Text>
-                    <Text color={isSelected ? 'cyan' : 'green'}>
-                      {cols.dateCol}
-                    </Text>
-                    <Text color="gray">{' | '}</Text>
-                    <Text color={isSelected ? 'cyan' : 'yellow'}>
-                      {cols.effortsCol}
-                    </Text>
-                  </Box>
-                );
-              })}
-            </>
-          )}
-        </Box>
-      )}
-
-      {/* Diálogo interactivo /settings */}
-      {activeDialog === 'settings' && (
-        <Box
-          flexDirection="column"
-          borderStyle="round"
-          borderColor="cyan"
-          paddingX={2}
-          paddingY={1}
-          marginBottom={1}
-        >
-          <Text bold color="cyan">
-            Panel de Preferencias (/settings) — ↑/↓ seleccionar, Enter/←/→ cambiar, Esc cerrar
-          </Text>
-          <Text color={dialogCursor === 0 ? 'cyan' : 'white'}>
-            {dialogCursor === 0 ? '❯ ' : '  '}Modo de permisos            :{' '}
-            {formatPermissionModeLabel(settings.permissionMode)}
-          </Text>
-          <Text color={dialogCursor === 1 ? 'cyan' : 'white'}>
-            {dialogCursor === 1 ? '❯ ' : '  '}Sub-Modo                    :{' '}
-            {settings.subMode === 'plan'
-              ? 'Plan (solo planear)'
-              : 'Agent (modificar)'}
-          </Text>
-          <Text color={dialogCursor === 2 ? 'cyan' : 'white'}>
-            {dialogCursor === 2 ? '❯ ' : '  '}Esfuerzo por defecto        :{' '}
-            {settings.effort.toUpperCase()}
-          </Text>
-          <Text color={dialogCursor === 3 ? 'cyan' : 'white'}>
-            {dialogCursor === 3 ? '❯ ' : '  '}Thoughts                    :{' '}
-            {settings.thoughts ? 'ON' : 'OFF'}
-          </Text>
-          <Text color={dialogCursor === 4 ? 'cyan' : 'white'}>
-            {dialogCursor === 4 ? '❯ ' : '  '}Advertencia --DAA al inicio :{' '}
-            {settings.hideDaaWarning ? 'OFF' : 'ON'}
-          </Text>
-        </Box>
-      )}
-
-      {/* Menú autocompletado de Slash Commands (muestra el comando original al buscar un alias como /clear -> /new) */}
-      {matchingSlash.length > 0 && activeDialog === 'none' && (
-        <Box
-          flexDirection="column"
-          borderStyle="single"
-          borderColor="gray"
-          paddingX={1}
-        >
-          {matchingSlash.map((item, idx) => (
-            <Box key={item.cmd} flexDirection="row">
-              <Text color={idx === suggestionIdx ? 'cyan' : 'white'} bold>
-                {idx === suggestionIdx ? '❯ ' : '  '}
-                {item.cmd.padEnd(12, ' ')}
-              </Text>
-              <Text color="gray">{item.desc}</Text>
-            </Box>
-          ))}
-        </Box>
-      )}
-
-      {/* Caja de entrada estilo Gemini CLI / Codex CLI */}
-      {activeDialog === 'none' && (
-        <Box
-          borderStyle="round"
-          borderColor={editingQueueIdx !== null ? 'yellow' : 'gray'}
-          paddingX={1}
-        >
-          <Text color={editingQueueIdx !== null ? 'yellow' : 'cyan'} bold>
-            {editingQueueIdx !== null
-              ? `[Editando Cola #${editingQueueIdx + 1}] › `
-              : '› '}
-          </Text>
-          {inputText.length > 0 ? (
-            <Text color="white">{inputText}█</Text>
-          ) : (
-            <Text color="gray">
-              Pide a Glitch CLI lo que quieras o escribe / para comandos...
+        {queuedPrompts.length > 0 && activeDialog === 'none' && (
+          <Box
+            flexDirection="column"
+            borderStyle="single"
+            borderColor="yellow"
+            paddingX={1}
+          >
+            <Text color="yellow" bold>
+              ⏳ En fila de espera ({queuedPrompts.length}) — usa ↑/↓ para elegir y Enter para editar en su misma posición:
             </Text>
-          )}
-        </Box>
-      )}
+            {queuedPrompts.map((qp, idx) => {
+              const isEditingThis = editingQueueIdx === idx;
+              return (
+                <Text
+                  key={idx}
+                  color={isEditingThis ? 'cyan' : 'white'}
+                  bold={isEditingThis}
+                >
+                  {isEditingThis ? '✎ ' : '  '}#{idx + 1}: {qp}
+                  {isEditingThis ? ' (editando en esta posición)' : ''}
+                </Text>
+              );
+            })}
+          </Box>
+        )}
 
-      {/* Barra de estado inferior sin corchetes y con nombre físico del modelo */}
-      <Box
-        flexDirection="row"
-        justifyContent="space-between"
-        paddingX={1}
-        marginTop={0}
-      >
-        <Text color="gray">? para atajos · Shift+Tab alterna Plan/Agent</Text>
-        <Text color="cyan">{formatStatusBar(settings)}</Text>
+        {matchingSlash.length > 0 && activeDialog === 'none' && (
+          <Box
+            flexDirection="column"
+            borderStyle="single"
+            borderColor="gray"
+            paddingX={1}
+          >
+            {matchingSlash.map((item, idx) => (
+              <Box key={item.cmd} flexDirection="row">
+                <Text color={idx === suggestionIdx ? 'cyan' : 'white'} bold>
+                  {idx === suggestionIdx ? '❯ ' : '  '}
+                  {item.cmd.padEnd(12, ' ')}
+                </Text>
+                <Text color="gray">{item.desc}</Text>
+              </Box>
+            ))}
+          </Box>
+        )}
+
+        {/* Barra justo arriba del chat: Izquierda (Modo + Sub-Modo) | Derecha (% Contexto · MCP activos · Skills) */}
+        {activeDialog === 'none' && (
+          <Box
+            flexDirection="row"
+            justifyContent="space-between"
+            paddingX={1}
+          >
+            <Text color={modeColor} bold>
+              {formatInputTopLeftMode(settings)}
+            </Text>
+            <Text color="gray">
+              {formatInputTopRightInfo(
+                sessionRef.current.history,
+                envCounts.mcpCount,
+                envCounts.skillCount,
+              )}
+            </Text>
+          </Box>
+        )}
+
+        {/* Caja de entrada anclada abajo */}
+        {activeDialog === 'none' && (
+          <Box
+            borderStyle="round"
+            borderColor={editingQueueIdx !== null ? 'yellow' : 'gray'}
+            paddingX={1}
+          >
+            <Text color={editingQueueIdx !== null ? 'yellow' : 'cyan'} bold>
+              {editingQueueIdx !== null
+                ? `[Editando Cola #${editingQueueIdx + 1}] › `
+                : `Mensaje ${userTurnCounter + 1} > `}
+            </Text>
+            {inputText.length > 0 ? (
+              <Text color="white">{inputText}█</Text>
+            ) : (
+              <Text color="gray">
+                Pide a Glitch CLI lo que quieras o escribe / para comandos...
+              </Text>
+            )}
+          </Box>
+        )}
+
+        {/* Barra inferior: ? para atajos a la izquierda | Modelo y Esfuerzo a la derecha */}
+        <Box
+          flexDirection="row"
+          justifyContent="space-between"
+          paddingX={1}
+          marginTop={0}
+        >
+          <Text color="gray">? para atajos</Text>
+          <Text color="cyan">{formatStatusBar(settings)}</Text>
+        </Box>
       </Box>
     </Box>
   );

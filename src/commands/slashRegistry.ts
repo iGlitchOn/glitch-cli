@@ -8,7 +8,7 @@ export const SLASH_COMMANDS: readonly SlashCommandEntry[] = [
   {
     cmd: '/new',
     aliases: ['clear', 'cls', 'clean', 'reset', 'limpiar', 'nuevo'],
-    desc: 'Iniciar conversación limpia (alternativas: /clear, /cls, /reset)',
+    desc: 'Iniciar conversación limpia',
   },
   {
     cmd: '/resume',
@@ -47,11 +47,6 @@ export const SLASH_COMMANDS: readonly SlashCommandEntry[] = [
   },
 ];
 
-/**
- * Busca comandos por su nombre original o por cualquiera de sus alternativas/alias.
- * Si el usuario busca `/clear` o `/cl`, devuelve la entrada original `/new` para que
- * al seleccionarla se coloque y ejecute `/new`.
- */
 export function matchSlashCommands(rawInput: string): SlashCommandEntry[] {
   const trimmed = rawInput.trim().toLowerCase();
   if (!trimmed.startsWith('/') || trimmed.includes(' ')) {
@@ -69,7 +64,9 @@ export function matchSlashCommands(rawInput: string): SlashCommandEntry[] {
     const cmdName = item.cmd.slice(1).toLowerCase();
     if (cmdName.startsWith(query)) {
       directMatches.push(item);
-    } else if (item.aliases.some((alias) => alias.toLowerCase().startsWith(query))) {
+    } else if (
+      item.aliases.some((alias) => alias.toLowerCase().startsWith(query))
+    ) {
       aliasMatches.push(item);
     }
   }
@@ -77,10 +74,6 @@ export function matchSlashCommands(rawInput: string): SlashCommandEntry[] {
   return [...directMatches, ...aliasMatches];
 }
 
-/**
- * Resuelve cualquier comando o alias (ej. `/clear arg` -> `/new arg`, `/cls` -> `/new`)
- * a su comando canónico original.
- */
 export function resolveSlashCommandAlias(rawInput: string): string {
   const trimmed = rawInput.trim();
   if (!trimmed.startsWith('/')) {
@@ -88,12 +81,17 @@ export function resolveSlashCommandAlias(rawInput: string): string {
   }
 
   const spaceIdx = trimmed.indexOf(' ');
-  const token = (spaceIdx === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIdx)).toLowerCase();
+  const token = (
+    spaceIdx === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIdx)
+  ).toLowerCase();
   const rest = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx);
 
   for (const item of SLASH_COMMANDS) {
     const cmdName = item.cmd.slice(1).toLowerCase();
-    if (cmdName === token || item.aliases.some((a) => a.toLowerCase() === token)) {
+    if (
+      cmdName === token ||
+      item.aliases.some((a) => a.toLowerCase() === token)
+    ) {
       return `${item.cmd}${rest}`;
     }
   }

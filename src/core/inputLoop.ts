@@ -20,14 +20,14 @@ export interface InputDispatcherOptions {
 
 export function printHelpMenu(out: OutputFn = console.log): void {
   out('Comandos dentro de Glitch CLI:');
-  out('  /new                      Iniciar conversación limpia (alternativas: /clear, /cls, /reset)');
-  out('  /resume [num|id]          Retomar una conversación anterior guardada (alternativas: /continue, /history)');
+  out('  /new                      Iniciar conversación limpia');
+  out('  /resume [num|id]          Retomar una conversación anterior guardada');
   out('  /model [id] [effort]      Seleccionar modelo y esfuerzo (ej. /model gemini-4-argon high)');
   out('  /effort [low|medium|high] Ver o cambiar el nivel de esfuerzo del modelo actual en vivo');
   out('  /settings                 Panel de preferencias (Modo, Sub-Modo, Esfuerzo, Thoughts, Aviso --DAA)');
   out('  /auth                     Configurar conexión (Vertex AI o API personalizada)');
-  out('  /help                     Mostrar esta ayuda (alternativas: /shortcuts, ?)');
-  out('  /exit                     Salir de Glitch CLI (alternativas: /quit, /q)');
+  out('  /help                     Mostrar esta ayuda');
+  out('  /exit                     Salir de Glitch CLI');
   out('Flags al iniciar en terminal:');
   out('  glitch --DAA                        Iniciar forzando Always Allow sin sandbox (con aviso TUI de 3s)');
   out('  glitch --dangerously-always-allow   Equivalente a --DAA');

@@ -24,6 +24,8 @@ export function createVertexGenAI(config: VertexConfig): GoogleGenAI {
 
   process.env['GOOGLE_CLOUD_PROJECT'] = config.project.trim();
   process.env['GOOGLE_CLOUD_LOCATION'] = config.location.trim();
+  delete process.env['GOOGLE_API_KEY'];
+  delete process.env['GEMINI_API_KEY'];
 
   return new GoogleGenAI({
     vertexai: true,
