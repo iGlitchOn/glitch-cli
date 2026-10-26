@@ -31,12 +31,24 @@ export interface GlitchSettings {
 }
 
 export const DEFAULT_SETTINGS: GlitchSettings = {
-  model: 'gemini-2.5-pro',
+  model: 'gemini-4-argon',
   effort: 'medium',
   thoughts: true,
-  permissionMode: 'ask_insecure',
+  permissionMode: 'always_allow',
   subMode: 'agent',
 };
+
+export function hasAlwaysAllowFlag(argv: readonly string[]): boolean {
+  return argv.some((arg) => {
+    const clean = arg.trim();
+    return (
+      clean === '-AA' ||
+      clean === '--aa' ||
+      clean === '--AA' ||
+      clean === '--dangerously-always-allow'
+    );
+  });
+}
 
 export function getSettingsPath(customHomeDir?: string): string {
   const home = customHomeDir ?? os.homedir();
@@ -54,7 +66,10 @@ export function maskApiKey(apiKey: string | undefined): string {
   return `${trimmed.slice(0, 3)}****${trimmed.slice(-4)}`;
 }
 
-export function loadSettings(customHomeDir?: string): GlitchSettings {
+export function loadSettings(
+  customHomeDir?: string,
+  argv: readonly string[] = [],
+): GlitchSettings {
   const filePath = getSettingsPath(customHomeDir);
   let loaded: Partial<GlitchSettings> = {};
 
@@ -76,11 +91,17 @@ export function loadSettings(customHomeDir?: string): GlitchSettings {
       ? { project: envProject, location: envLocation }
       : undefined);
 
-  return {
+  const merged: GlitchSettings = {
     ...DEFAULT_SETTINGS,
     ...loaded,
     ...(vertex ? { vertex } : {}),
   };
+
+  if (hasAlwaysAllowFlag(argv)) {
+    merged.permissionMode = 'always_allow';
+  }
+
+  return merged;
 }
 
 export function saveSettings(

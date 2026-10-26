@@ -17,7 +17,8 @@ export async function main(
     process.stdout.write('\x1b[2J\x1b[H');
   }
 
-  const initialSettings = loadSettings();
+  // Sin sandbox: acceso completo al PC desde cualquier directorio, con Always Allow (-AA) por defecto
+  const initialSettings = loadSettings(undefined, argv);
   const instance = render(
     React.createElement(TuiApp, { initialSettings, version: '0.1.0' }),
   );

@@ -834,20 +834,22 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           <Box flexDirection="column" marginBottom={1}>
             <Text bold color="white">
               {'  '}
-              {'NOMBRE DEL MODELO'.padEnd(38, ' ')}
+              {'NOMBRE DEL MODELO'.padEnd(36, ' ')}
               {' | '}
-              {'ID MODELO'.padEnd(34, ' ')}
+              {'ID MODELO'.padEnd(32, ' ')}
               {' | '}
-              {'EFFORTS APLICABLES'}
+              {'FECHA'.padEnd(10, ' ')}
+              {' | '}
+              {'ESFUERZO'}
             </Text>
-            <Text color="gray">{'  ' + '─'.repeat(96)}</Text>
+            <Text color="gray">{'  ' + '─'.repeat(104)}</Text>
           </Box>
 
-          {/* Filas de la familia actual */}
+          {/* Filas de la familia actual (ordenadas de más reciente a más antiguo) */}
           {(modelPages[modelPageIdx]?.models ?? []).map((m, idx) => {
             const isSelected = idx === dialogCursor;
             const isCurrent = m.id === settings.model;
-            const cols = formatModelRowColumns(m, isCurrent, 38, 34);
+            const cols = formatModelRowColumns(m, isCurrent, 36, 32, 10);
             return (
               <Box key={m.id} flexDirection="row">
                 <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
@@ -856,6 +858,10 @@ export const TuiApp: React.FC<TuiAppProps> = ({
                 </Text>
                 <Text color="gray">{' | '}</Text>
                 <Text color={isSelected ? 'cyan' : 'gray'}>{cols.idCol}</Text>
+                <Text color="gray">{' | '}</Text>
+                <Text color={isSelected ? 'cyan' : 'green'}>
+                  {cols.dateCol}
+                </Text>
                 <Text color="gray">{' | '}</Text>
                 <Text color={isSelected ? 'cyan' : 'yellow'}>
                   {cols.effortsCol}

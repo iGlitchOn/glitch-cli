@@ -10,6 +10,7 @@ import {
   groupModelsByFamilyPages,
   isGoogleFreeTrialModelId,
   listVertexGoogleModels,
+  sortModelsByDateDesc,
 } from '../config/models.js';
 import { DEFAULT_SETTINGS, type GlitchSettings } from '../config/settings.js';
 import { runModelCommand } from '../commands/model.js';
@@ -61,7 +62,7 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     expect(ids.some((id) => id.includes('claude'))).toBe(false);
   });
 
-  it('usa el registro local models.ts si la API de listado falla', async () => {
+  it('usa el registro local models.ts ordenado por fecha descendente si la API de listado falla', async () => {
     const failingAi = {
       models: {
         list: async () => {
@@ -71,7 +72,7 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     } as unknown as GoogleGenAI;
 
     const models = await listVertexGoogleModels(failingAi);
-    expect(models).toEqual(LOCAL_GOOGLE_MODELS);
+    expect(models).toEqual(sortModelsByDateDesc(LOCAL_GOOGLE_MODELS));
   });
 
   it('configura thinkingLevel en Argon sin enviar jamás thinkingBudget ni MINIMAL', () => {
@@ -97,12 +98,10 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
   it('/effort valida niveles por modelo y dice que no aplica cuando no soporta thinkingLevel', () => {
     const logs: string[] = [];
 
-    // Sin argumento muestra el actual y permitidos
     runEffortCommand(baseSettings, '', (m) => logs.push(m), tempHome);
     expect(logs.at(-1)).toContain('MEDIUM');
     expect(logs.at(-1)).toContain('LOW, MEDIUM, HIGH');
 
-    // Rechaza MINIMAL y thinking_budget
     const afterMinimal = runEffortCommand(
       baseSettings,
       'minimal',
@@ -112,7 +111,6 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     expect(afterMinimal.effort).toBe('medium');
     expect(logs.at(-1)).toContain('MINIMAL y thinking_budget no están permitidos');
 
-    // En gemini-4-argon-cyber-permissive solo permite HIGH
     const cyberSettings: GlitchSettings = {
       ...baseSettings,
       model: 'gemini-4-argon-cyber-permissive',
@@ -127,7 +125,6 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     expect(afterLowOnCyber.effort).toBe('high');
     expect(logs.at(-1)).toContain('Niveles permitidos: high');
 
-    // En gemini-2.5-pro o gemma dice que no aplica
     const gemini25Settings: GlitchSettings = {
       ...baseSettings,
       model: 'gemini-2.5-pro',
@@ -139,7 +136,6 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
   it('/model rechaza cambios durante una petición activa y ajusta el effort al cambiar de modelo', async () => {
     const logs: string[] = [];
 
-    // Bloqueado si hay petición activa
     const blocked = await runModelCommand(
       baseSettings,
       LOCAL_GOOGLE_MODELS,
@@ -152,7 +148,6 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     expect(blocked.model).toBe('gemini-4-argon');
     expect(logs.at(-1)).toContain('petición activa');
 
-    // Cambio a gemini-4-argon-cyber-permissive ajusta effort de 'low' a 'high'
     const lowArgon: GlitchSettings = { ...baseSettings, effort: 'low' };
     const switched = await runModelCommand(
       lowArgon,
@@ -167,10 +162,10 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     expect(switched.effort).toBe('high');
   });
 
-  it('renderiza la barra de estado con modelo, effort, modo y sub-modo', () => {
+  it('renderiza la barra de estado con modelo, effort, modo (Always Allow por defecto) y sub-modo', () => {
     const bar = formatStatusBar(baseSettings);
     expect(bar).toBe(
-      '[Modelo: gemini-4-argon | Effort: MEDIUM | Modo: Ask only insecure | Sub-modo: Agent]',
+      '[Modelo: gemini-4-argon | Effort: MEDIUM | Modo: Always Allow | Sub-modo: Agent]',
     );
 
     const noEffortBar = formatStatusBar({
@@ -178,17 +173,28 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
       model: 'gemma-3-27b-it',
     });
     expect(noEffortBar).toBe(
-      '[Modelo: gemma-3-27b-it | Effort: N/A | Modo: Ask only insecure | Sub-modo: Agent]',
+      '[Modelo: gemma-3-27b-it | Effort: N/A | Modo: Always Allow | Sub-modo: Agent]',
     );
   });
 
-  it('separa los modelos en páginas por familia (Gemini, Gemma, Nano Banana) y formatea NOMBRE (active) | ID | EFFORTS en orden', () => {
+  it('separa los modelos en páginas limpias (Gemini, Gemma, Nano Banana, Embeddings), ordenados por fecha descendente y formatea NOMBRE (active) | ID | FECHA | ESFUERZO (LOW - MEDIUM - HIGH)', () => {
     const pages = groupModelsByFamilyPages(LOCAL_GOOGLE_MODELS);
     expect(pages.map((p) => p.family)).toEqual([
       'gemini',
       'gemma',
       'nano-banana',
+      'embeddings',
     ]);
+
+    // En la página 1 (Gemini), el más reciente (2026-04-15 Argon) está arriba y el más antiguo (2025-02-05) abajo, sin embeddings ni imagen mezclados
+    const geminiPage = pages[0]!;
+    expect(geminiPage.models[0]?.releaseDate).toBe('2026-04-15');
+    expect(geminiPage.models.at(-1)?.releaseDate).toBe('2025-02-05');
+    expect(
+      geminiPage.models.some(
+        (m) => m.id.includes('embedding') || m.id.includes('image'),
+      ),
+    ).toBe(false);
 
     const argonModel = LOCAL_GOOGLE_MODELS.find(
       (m) => m.id === 'gemini-4-argon',
@@ -196,9 +202,10 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
     const activeRow = formatModelRowColumns(argonModel, true);
     expect(activeRow.nameCol).toContain('Gemini 4 Argon (active)');
     expect(activeRow.idCol.trim()).toBe('gemini-4-argon');
-    expect(activeRow.effortsCol).toBe('LOW, MEDIUM, HIGH');
+    expect(activeRow.dateCol.trim()).toBe('2026-04-15');
+    expect(activeRow.effortsCol).toBe('LOW - MEDIUM - HIGH');
     expect(activeRow.formatted).toContain(
-      '| gemini-4-argon                     | LOW, MEDIUM, HIGH',
+      '| gemini-4-argon                   | 2026-04-15 | LOW - MEDIUM - HIGH',
     );
   });
 });

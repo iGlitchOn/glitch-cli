@@ -44,15 +44,15 @@ export async function runModelCommand(
     const pages = groupModelsByFamilyPages(availableModels);
     out('=== Modelos disponibles por familia (/model) ===');
     out(
-      `  ${'NOMBRE DEL MODELO'.padEnd(38, ' ')} | ${'ID MODELO'.padEnd(34, ' ')} | EFFORTS APLICABLES`,
+      `  ${'NOMBRE DEL MODELO'.padEnd(36, ' ')} | ${'ID MODELO'.padEnd(32, ' ')} | ${'FECHA'.padEnd(10, ' ')} | ESFUERZO`,
     );
-    out('  ' + '-'.repeat(96));
+    out('  ' + '-'.repeat(104));
     let globalIdx = 1;
     pages.forEach((page, pageIdx) => {
       out(`  [Página ${pageIdx + 1}/${pages.length}: ${page.title}]`);
       for (const m of page.models) {
         const isCurrent = m.id === currentSettings.model;
-        const row = formatModelRowColumns(m, isCurrent);
+        const row = formatModelRowColumns(m, isCurrent, 36, 32, 10);
         out(
           `  ${String(globalIdx).padStart(2, ' ')}) ${row.formatted}`,
         );
