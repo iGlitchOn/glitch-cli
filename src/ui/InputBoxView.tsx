@@ -92,6 +92,7 @@ export interface InputBoxViewProps {
   maxInputBoxLines: number;
   userTurnCounter: number;
   editingQueueIdx: number | null;
+  draggingQueueIdx?: number | null;
   confirmDeleteQueueIdx: number | null;
   ctrlCPending: boolean;
   queuedPrompts: readonly string[];
@@ -105,6 +106,7 @@ export const InputBoxView: React.FC<InputBoxViewProps> = ({
   columns,
   maxInputBoxLines,
   editingQueueIdx,
+  draggingQueueIdx = null,
   confirmDeleteQueueIdx,
   ctrlCPending,
   queuedPrompts,
@@ -174,21 +176,25 @@ export const InputBoxView: React.FC<InputBoxViewProps> = ({
       {queuedPrompts.length > 0 && (
         <Box flexDirection="column" paddingX={1} marginBottom={1}>
           <Text color="gray" dimColor>
-            {`En fila (${queuedPrompts.length}):`}
+            {queuedPrompts.length > 1
+              ? `En fila (${queuedPrompts.length}) · arrastra o Alt+↑/↓ para mover:`
+              : `En fila (${queuedPrompts.length}):`}
           </Text>
           {queuedPrompts.map((qp, idx) => {
             const isEditingThis = editingQueueIdx === idx;
+            const isDraggingThis = draggingQueueIdx === idx;
+            const isHighlighted = isEditingThis || isDraggingThis;
             const displayLine = formatQueueItemDisplayLine(
               qp,
               idx + 1,
-              isEditingThis,
+              isHighlighted,
               columns,
             );
             return (
               <Text
                 key={idx}
-                color={isEditingThis ? 'cyan' : 'gray'}
-                bold={isEditingThis}
+                color={isHighlighted ? 'cyan' : 'gray'}
+                bold={isHighlighted}
                 wrap="truncate-end"
               >
                 {displayLine}

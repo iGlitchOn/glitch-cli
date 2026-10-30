@@ -6,7 +6,7 @@ import { matchSlashCommands } from '../commands/slashRegistry.js';
 import { computeChatCostSummary, computeContextUsageBreakdown, type CostRequestRecord } from './statusBar.js';
 import { BRACKETED_PASTE_START, BracketedPasteParser, normalizePastedText, readWindowsClipboard, snapshotPastedImageMap } from '../core/clipboard.js';
 import { createCompactionTracker, type CompactionTracker } from '../core/compaction.js';
-import { InputUndoManager, applyBracketedPasteToEditor, insertTextAtCursor, type LineEditorState } from '../core/lineEditor.js';
+import { InputUndoManager, applyBracketedPasteToEditor, insertTextAtCursor, reorderQueueItem, type LineEditorState } from '../core/lineEditor.js';
 import { discoverMcpServers, type McpServerEntry } from '../core/mcpRegistry.js';
 import { SessionState } from '../core/session.js';
 import { createSessionId, countRealUserTurns, deriveSessionTitle, listSavedSessions, saveSessionToDisk, scheduleSaveSessionToDisk, type SavedSession, type SavedUiMessage } from '../core/sessionStore.js';
@@ -108,6 +108,8 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const queueRef = useRef<string[]>([]);
   const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
   const [editingQueueIdx, setEditingQueueIdx] = useState<number | null>(null);
+  const [draggingQueueIdx, setDraggingQueueIdx] = useState<number | null>(null);
+  const draggingQueueIdxRef = useRef<number | null>(null);
   const [confirmDeleteQueueIdx, setConfirmDeleteQueueIdx] = useState<number | null>(null);
   const originalEditingQueueTextRef = useRef<string>('');
   const draftInputRef = useRef<string>('');
@@ -307,6 +309,9 @@ export const TuiApp: React.FC<TuiAppProps> = ({
     setActiveDialog('agents_chats');
   };
   const handleSgrMouseEvents = (events: SgrMouseEvent[]) => {
+    const curMaxInputLines = Math.max(1, Math.min(10, Math.floor(rows * 0.35)));
+    const curVisibleInputLines = Math.min(Math.max(1, inputStateRef.current.text.split('\n').length), curMaxInputLines);
+    const curMatchingSlashCount = activeDialog === 'none' && confirmDeleteQueueIdx === null ? matchSlashCommands(inputStateRef.current.text).length : 0;
     dispatchSgrMouseEvents({
       events, columns, rows, lineLinkMap, messages: messagesRef.current,
       isAtBottom: scrollStateRef.current.isAtBottom,
@@ -330,6 +335,30 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       onOpenSettingsDialog: () => {
         setDialogCursor(0); setEditingThresholdMode(false);
         setThresholdError(''); setActiveDialog('settings');
+      },
+      queueLength: activeDialog === 'none' ? queueRef.current.length : 0,
+      visibleInputBoxLines: curVisibleInputLines,
+      slashSuggestionsCount: curMatchingSlashCount,
+      draggingQueueIdx: draggingQueueIdxRef.current,
+      onStartQueueDrag: (idx) => {
+        draggingQueueIdxRef.current = idx;
+        setDraggingQueueIdx(idx);
+      },
+      onMoveQueueDrag: (targetIdx) => {
+        const fromIdx = draggingQueueIdxRef.current;
+        if (fromIdx === null || fromIdx === targetIdx) return;
+        const res = reorderQueueItem(queueRef.current, fromIdx, targetIdx, editingQueueIdx);
+        if (res.moved) {
+          queueRef.current = res.queue;
+          syncQueueState();
+          setEditingQueueIdx(res.nextEditingIdx);
+          draggingQueueIdxRef.current = res.toIndex;
+          setDraggingQueueIdx(res.toIndex);
+        }
+      },
+      onEndQueueDrag: () => {
+        draggingQueueIdxRef.current = null;
+        setDraggingQueueIdx(null);
       },
     });
   };
@@ -622,7 +651,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
             />
             <InputBoxView
               inputText={inputText} inputCursor={inputCursor} columns={columns} maxInputBoxLines={maxInputBoxLines}
-              userTurnCounter={userTurnCounter} editingQueueIdx={editingQueueIdx} confirmDeleteQueueIdx={confirmDeleteQueueIdx}
+              userTurnCounter={userTurnCounter} editingQueueIdx={editingQueueIdx} draggingQueueIdx={draggingQueueIdx} confirmDeleteQueueIdx={confirmDeleteQueueIdx}
               ctrlCPending={ctrlCPending} queuedPrompts={queuedPrompts} matchingSlash={matchingSlash} suggestionIdx={suggestionIdx}
             />
           </>

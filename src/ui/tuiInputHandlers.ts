@@ -11,6 +11,7 @@ import {
   moveCursorHome,
   moveCursorLeft,
   moveCursorRight,
+  reorderQueueItem,
   type LineEditorState,
 } from '../core/lineEditor.js';
 import type { SessionState } from '../core/session.js';
@@ -149,6 +150,37 @@ export function handleMainEditorKeyInput(
       }
       return;
     }
+  }
+  if (
+    ctx.matchingSlash.length === 0 &&
+    ctx.queueRef.current.length > 1 &&
+    (key.meta || key.shift || key.ctrl) &&
+    (key.upArrow || key.downArrow)
+  ) {
+    const q = ctx.queueRef.current;
+    const fromIdx =
+      ctx.editingQueueIdx !== null ? ctx.editingQueueIdx : q.length - 1;
+    const toIdx = key.upArrow
+      ? Math.max(0, fromIdx - 1)
+      : Math.min(q.length - 1, fromIdx + 1);
+    if (ctx.editingQueueIdx === null) {
+      ctx.draftInputRef.current = ctx.inputText;
+      const fullQueueText = q[fromIdx] ?? '';
+      ctx.originalEditingQueueTextRef.current = fullQueueText;
+      ctx.applyInputState({
+        text: fullQueueText,
+        cursor: fullQueueText.length,
+      });
+    }
+    const res = reorderQueueItem(q, fromIdx, toIdx, fromIdx);
+    if (res.moved) {
+      ctx.queueRef.current = res.queue;
+      ctx.syncQueueState();
+      ctx.setEditingQueueIdx(res.nextEditingIdx);
+    } else if (ctx.editingQueueIdx === null) {
+      ctx.setEditingQueueIdx(fromIdx);
+    }
+    return;
   }
   if (
     ctx.matchingSlash.length === 0 &&

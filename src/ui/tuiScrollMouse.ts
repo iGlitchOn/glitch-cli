@@ -8,9 +8,9 @@ export const MIN_ROWS_FOR_HEADER = 12;
 export const ENABLE_MOUSE_REPORTING = '\x1b[?1000h\x1b[?1006h\x1b[?1007h';
 export const DISABLE_MOUSE_REPORTING = '\x1b[?1007l\x1b[?1006l\x1b[?1000l';
 export const ENABLE_TERMINAL_FULL =
-  '\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?1007h';
+  '\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h';
 export const DISABLE_TERMINAL_FULL =
-  '\x1b[?1007l\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?25h';
+  '\x1b[?1007l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h';
 
 export function shouldShowHeaderForRows(rows: number): boolean {
   return rows >= MIN_ROWS_FOR_HEADER;
@@ -265,6 +265,47 @@ export function readTerminalSize(stream?: NodeJS.WritableStream): {
   return { columns: cols, rows };
 }
 
+export interface QueueDragLayoutParams {
+  rows: number;
+  queueLength: number;
+  visibleInputBoxLines?: number;
+  slashSuggestionsCount?: number;
+}
+
+export function computeQueueItemBoundsY(params: QueueDragLayoutParams): {
+  firstItemY: number;
+  lastItemY: number;
+} {
+  const inputBoxLinesWithBorder = Math.max(1, params.visibleInputBoxLines ?? 1) + 2;
+  const slashRows =
+    params.slashSuggestionsCount && params.slashSuggestionsCount > 0
+      ? params.slashSuggestionsCount + 1
+      : 0;
+  // StatusBarBottom (1 línea en rows) + InputBox (visible + 2) + slashRows + marginBottom de queue (1)
+  const lastItemY = params.rows - 1 - inputBoxLinesWithBorder - slashRows - 1;
+  const firstItemY = lastItemY - Math.max(0, params.queueLength - 1);
+  return { firstItemY, lastItemY };
+}
+
+export function resolveQueueItemIndexAtMouseY(
+  mouseY: number,
+  params: QueueDragLayoutParams,
+  clampOutsideBounds = false,
+): number | null {
+  if (params.queueLength <= 0) return null;
+  const { firstItemY, lastItemY } = computeQueueItemBoundsY(params);
+  if (clampOutsideBounds) {
+    return Math.max(
+      0,
+      Math.min(params.queueLength - 1, mouseY - firstItemY),
+    );
+  }
+  if (mouseY < firstItemY || mouseY > lastItemY) {
+    return null;
+  }
+  return mouseY - firstItemY;
+}
+
 export interface SgrMouseDispatchParams {
   events: readonly SgrMouseEvent[];
   columns: number;
@@ -283,11 +324,82 @@ export interface SgrMouseDispatchParams {
   onOpenModelDialog?: () => void;
   onOpenUsageDialog?: () => void;
   onOpenSettingsDialog?: () => void;
+  queueLength?: number;
+  visibleInputBoxLines?: number;
+  slashSuggestionsCount?: number;
+  draggingQueueIdx?: number | null;
+  onStartQueueDrag?: (idx: number) => void;
+  onMoveQueueDrag?: (targetIdx: number) => void;
+  onEndQueueDrag?: () => void;
 }
 
 export function dispatchSgrMouseEvents(params: SgrMouseDispatchParams): void {
   const { events, columns, rows, lineLinkMap } = params;
+  const queueLen = params.queueLength ?? 0;
+  let activeDragIdx = params.draggingQueueIdx ?? null;
+
   for (const ev of events) {
+    if (queueLen > 0 && activeDragIdx !== null) {
+      if (ev.action === 'motion' && ev.button === 0) {
+        const targetIdx = resolveQueueItemIndexAtMouseY(
+          ev.y,
+          {
+            rows,
+            queueLength: queueLen,
+            visibleInputBoxLines: params.visibleInputBoxLines,
+            slashSuggestionsCount: params.slashSuggestionsCount,
+          },
+          true,
+        );
+        if (targetIdx !== null && targetIdx !== activeDragIdx) {
+          activeDragIdx = targetIdx;
+          params.onMoveQueueDrag?.(targetIdx);
+        }
+        continue;
+      }
+      if (ev.action === 'release') {
+        const targetIdx = resolveQueueItemIndexAtMouseY(
+          ev.y,
+          {
+            rows,
+            queueLength: queueLen,
+            visibleInputBoxLines: params.visibleInputBoxLines,
+            slashSuggestionsCount: params.slashSuggestionsCount,
+          },
+          true,
+        );
+        if (targetIdx !== null && targetIdx !== activeDragIdx) {
+          params.onMoveQueueDrag?.(targetIdx);
+        }
+        activeDragIdx = null;
+        params.onEndQueueDrag?.();
+        continue;
+      }
+    }
+
+    if (
+      queueLen > 0 &&
+      ev.button === 0 &&
+      ev.action === 'press' &&
+      ev.x < columns - 2
+    ) {
+      const clickedQueueIdx = resolveQueueItemIndexAtMouseY(
+        ev.y,
+        {
+          rows,
+          queueLength: queueLen,
+          visibleInputBoxLines: params.visibleInputBoxLines,
+          slashSuggestionsCount: params.slashSuggestionsCount,
+        },
+        false,
+      );
+      if (clickedQueueIdx !== null) {
+        activeDragIdx = clickedQueueIdx;
+        params.onStartQueueDrag?.(clickedQueueIdx);
+        continue;
+      }
+    }
+
     if (ev.ctrl && ev.action === 'press') {
       for (const [lineIdx] of lineLinkMap.entries()) {
         const foundUrl =

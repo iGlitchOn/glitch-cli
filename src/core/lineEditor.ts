@@ -457,3 +457,76 @@ export function formatInputPlaceholder(
   return `${clean.slice(0, sliceLen)}...`;
 }
 
+export interface ReorderQueueResult {
+  queue: string[];
+  nextEditingIdx: number | null;
+  moved: boolean;
+  fromIndex: number;
+  toIndex: number;
+}
+
+/**
+ * Mueve un mensaje de la fila desde `fromIndex` hasta `toIndex` (0-based),
+ * desplazando los elementos intermedios (ej. si el último sube al 2do puesto,
+ * el 2do pasa a 3ro, el 3ro a 4to y así se reacomoda toda la fila).
+ */
+export function reorderQueueItem(
+  queue: readonly string[],
+  fromIndex: number,
+  toIndex: number,
+  currentEditingIdx: number | null = null,
+): ReorderQueueResult {
+  const len = queue.length;
+  if (len <= 1 || fromIndex < 0 || fromIndex >= len) {
+    return {
+      queue: [...queue],
+      nextEditingIdx: currentEditingIdx,
+      moved: false,
+      fromIndex,
+      toIndex,
+    };
+  }
+  const clampedTo = Math.max(0, Math.min(len - 1, toIndex));
+  if (clampedTo === fromIndex) {
+    return {
+      queue: [...queue],
+      nextEditingIdx: currentEditingIdx,
+      moved: false,
+      fromIndex,
+      toIndex: clampedTo,
+    };
+  }
+
+  const next = [...queue];
+  const [movedItem] = next.splice(fromIndex, 1);
+  next.splice(clampedTo, 0, movedItem!);
+
+  let nextEditingIdx = currentEditingIdx;
+  if (currentEditingIdx !== null) {
+    if (currentEditingIdx === fromIndex) {
+      nextEditingIdx = clampedTo;
+    } else if (
+      fromIndex > clampedTo &&
+      currentEditingIdx >= clampedTo &&
+      currentEditingIdx < fromIndex
+    ) {
+      nextEditingIdx = currentEditingIdx + 1;
+    } else if (
+      fromIndex < clampedTo &&
+      currentEditingIdx > fromIndex &&
+      currentEditingIdx <= clampedTo
+    ) {
+      nextEditingIdx = currentEditingIdx - 1;
+    }
+  }
+
+  return {
+    queue: next,
+    nextEditingIdx,
+    moved: true,
+    fromIndex,
+    toIndex: clampedTo,
+  };
+}
+
+

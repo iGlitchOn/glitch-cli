@@ -63,6 +63,12 @@ export function useTerminalEffects({
   onInitialPrompt,
 }: UseTerminalEffectsParams): void {
   const initialPromptDispatchedRef = useRef(false);
+  const onSgrMouseEventsRef = useRef(onSgrMouseEvents);
+  onSgrMouseEventsRef.current = onSgrMouseEvents;
+  const scrollChatByRef = useRef(scrollChatBy);
+  scrollChatByRef.current = scrollChatBy;
+  const handleClipboardPasteRef = useRef(handleClipboardPaste);
+  handleClipboardPasteRef.current = handleClipboardPaste;
 
   useEffect(() => {
     if (daaSplashSeconds > 0 || initialPromptDispatchedRef.current) return;
@@ -142,13 +148,15 @@ export function useTerminalEffects({
     };
   }, [stdout]);
 
-  // Modo selección (Ctrl+S): apaga solo 1000, 1006 y 1007 dejando pantalla alterna (1049) y pegado entre corchetes (2004)
+  // Modo selección (Ctrl+S): apaga solo 1000, 1002, 1006 y 1007 dejando pantalla alterna (1049) y pegado entre corchetes (2004)
   useEffect(() => {
     const isTty = Boolean(stdout.isTTY || process.stdout.isTTY);
     if (!isTty) return;
     try {
       stdout.write(
-        selectionMode ? DISABLE_MOUSE_REPORTING : ENABLE_MOUSE_REPORTING,
+        selectionMode
+          ? `${DISABLE_MOUSE_REPORTING}\x1b[?1002l`
+          : `${ENABLE_MOUSE_REPORTING}\x1b[?1002h`,
       );
     } catch {
       // Ignorar
@@ -184,10 +192,24 @@ export function useTerminalEffects({
               : String(chunk);
         const { wheelDeltaLines, rightClickPaste, events } =
           parseMouseEventsFromChunk(rawStr);
-        if (wheelDeltaLines !== 0) scrollChatBy(wheelDeltaLines);
-        if (rightClickPaste) handleClipboardPaste();
+        if (wheelDeltaLines !== 0) scrollChatByRef.current(wheelDeltaLines);
+        if (rightClickPaste) handleClipboardPasteRef.current();
         if (events.length > 0) {
-          onSgrMouseEvents?.(events);
+          onSgrMouseEventsRef.current?.(events);
+          const strippedMouse = rawStr.replace(
+            /\x1b\[<\d+;\d+;\d+[Mm]/g,
+            '',
+          );
+          if (strippedMouse.length === 0) {
+            return null;
+          }
+          if (strippedMouse !== rawStr) {
+            return (
+              typeof chunk === 'string'
+                ? strippedMouse
+                : Buffer.from(strippedMouse, 'utf8')
+            ) as ReturnType<typeof origRead>;
+          }
         }
         if (
           rawStr === '\x08' ||

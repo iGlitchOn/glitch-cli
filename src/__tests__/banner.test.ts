@@ -62,6 +62,7 @@ import {
   applyBracketedPasteToEditor,
   createLineEditorState,
   formatInputPlaceholder,
+  reorderQueueItem,
 } from '../core/lineEditor.js';
 import {
   BRACKETED_PASTE_END,
@@ -88,8 +89,10 @@ import {
   ENABLE_MOUSE_REPORTING,
   TuiApp,
   computeEffectiveScrollTop,
+  computeQueueItemBoundsY,
   computeScrollbarThumb,
   decodeSgrMousePacket,
+  dispatchSgrMouseEvents,
   formatScrollToBottomLabel,
   parseMouseEventsFromChunk,
   parseMouseWheelSequences,
@@ -1036,5 +1039,79 @@ describe('Banner y Cabecera estilo Claude Code / Glitch CLI', () => {
     ).toBe(true);
     expect(formatScrollToBottomLabel(0)).toBe('ir al final');
     expect(formatScrollToBottomLabel(3)).toBe('ir al final (3 nuevos)');
+
+    // 6. Arrastre y reordenamiento de mensajes en la fila (Queue): arrastrar el último al segundo puesto desplaza el 2do a 3ro y el 3ro a 4to
+    const initialQueue = ['Primero', 'Segundo', 'Tercero', 'Ultimo agregado'];
+    const reordered = reorderQueueItem(initialQueue, 3, 1, 1);
+    expect(reordered.moved).toBe(true);
+    expect(reordered.queue).toEqual([
+      'Primero',
+      'Ultimo agregado',
+      'Segundo',
+      'Tercero',
+    ]);
+    // El que estaba siendo editado en índice 1 ("Segundo") pasó automáticamente al índice 2 (tercer puesto)
+    expect(reordered.nextEditingIdx).toBe(2);
+
+    // Simulación de drag & drop con el ratón sobre las filas de la cola en TUI
+    let liveQueue = ['Msg 1', 'Msg 2', 'Msg 3', 'Msg 4'];
+    let draggingIdx: number | null = null;
+    const rows = 30;
+    const bounds = computeQueueItemBoundsY({
+      rows,
+      queueLength: liveQueue.length,
+      visibleInputBoxLines: 1,
+      slashSuggestionsCount: 0,
+    });
+    const pressLastEv = decodeSgrMousePacket(0, 10, bounds.lastItemY, 'M');
+    const dragToSecondEv = decodeSgrMousePacket(
+      32,
+      10,
+      bounds.firstItemY + 1,
+      'M',
+    );
+    const releaseEvQueue = decodeSgrMousePacket(
+      0,
+      10,
+      bounds.firstItemY + 1,
+      'm',
+    );
+
+    dispatchSgrMouseEvents({
+      events: [pressLastEv, dragToSecondEv, releaseEvQueue],
+      columns: 100,
+      rows,
+      lineLinkMap: new Map(),
+      messages: [],
+      isAtBottom: true,
+      readMaxScrollTop: () => 0,
+      updateScrollState: () => {},
+      showTransientNotice: () => {},
+      setThoughtsCollapsed: () => {},
+      setCopiedMessageId: () => {},
+      togglePerMessageCollapsed: () => {},
+      queueLength: liveQueue.length,
+      visibleInputBoxLines: 1,
+      slashSuggestionsCount: 0,
+      draggingQueueIdx: draggingIdx,
+      onStartQueueDrag: (idx) => {
+        draggingIdx = idx;
+      },
+      onMoveQueueDrag: (targetIdx) => {
+        if (draggingIdx !== null) {
+          const r = reorderQueueItem(liveQueue, draggingIdx, targetIdx);
+          if (r.moved) {
+            liveQueue = r.queue;
+            draggingIdx = r.toIndex;
+          }
+        }
+      },
+      onEndQueueDrag: () => {
+        draggingIdx = null;
+      },
+    });
+
+    expect(liveQueue).toEqual(['Msg 1', 'Msg 4', 'Msg 2', 'Msg 3']);
+    expect(draggingIdx).toBeNull();
   });
 });
