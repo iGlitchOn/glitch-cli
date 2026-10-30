@@ -33,7 +33,6 @@ import {
   spawnGlitchTerminalWindow,
 } from '../core/tools.js';
 import type { ActiveDialog } from './DialogsView.js';
-import { formatCostAuditReport } from './statusBar.js';
 export interface CommandDispatchContext {
   session: SessionState;
   settings: GlitchSettings;
@@ -313,33 +312,6 @@ export function executeTuiInputCommand(
       `Renderizador actual: ${nextMode}. Uso: /tui <default|fullscreen>`,
     );
     return;
-  }
-  if (resolved === '/debug' || resolved.startsWith('/debug ')) {
-    const sub = resolved.slice('/debug'.length).trim().toLowerCase();
-    if (
-      !sub ||
-      sub === 'cost' ||
-      sub === 'costs' ||
-      sub === 'costo' ||
-      sub === 'costos'
-    ) {
-      ctx.session.debugCostEnabled = !ctx.session.debugCostEnabled;
-      const curSettings = ctx.session.settings;
-      const auditLines = formatCostAuditReport(
-        ctx.session.costRecords,
-        ctx.lastTurnCostUsd,
-        ctx.sessionCostUsd,
-        curSettings.model,
-        curSettings.modelPricing,
-      );
-      ctx.addSystemMessage(
-        [
-          `=== Modo Debug de Costos (/debug cost): ${ctx.session.debugCostEnabled ? 'ACTIVADO (ON)' : 'DESACTIVADO (OFF)'} ===`,
-          ...auditLines,
-        ].join('\n'),
-      );
-      return;
-    }
   }
   if (resolved.startsWith('/')) {
     ctx.addSystemMessage(

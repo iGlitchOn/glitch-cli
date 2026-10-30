@@ -48,12 +48,6 @@ export const SLASH_COMMANDS: readonly SlashCommandEntry[] = [
     desc: 'Auditar de dónde sale el % de contexto, tokens reales, MCPs, skills y costos por petición',
   },
   {
-    cmd: '/debug',
-    displayCmd: '/debug cost',
-    aliases: ['debug', 'costos', 'cost-debug'],
-    desc: 'Modo debug de costos (/debug cost): muestra tokens reales, precios y costo por petición',
-  },
-  {
     cmd: '/skills',
     displayCmd: '/skills',
     aliases: ['skills', 'skill', 'habilidades', 'habilidad'],

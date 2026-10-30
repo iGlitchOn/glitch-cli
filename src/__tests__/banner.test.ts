@@ -318,7 +318,7 @@ describe('Banner y Cabecera estilo Claude Code / Glitch CLI', () => {
     );
     expect(SLASH_COMMANDS.every((c) => typeof c.desc === 'string')).toBe(true);
     expect(resolveSlashCommandAlias('/contexto')).toBe('/usage');
-    expect(resolveSlashCommandAlias('/debug cost')).toBe('/debug cost');
+    expect(SLASH_COMMANDS.some((c) => c.cmd === '/debug')).toBe(false);
     expect(matchSlashCommands('/').some((c) => c.cmd.includes(' '))).toBe(
       false,
     );

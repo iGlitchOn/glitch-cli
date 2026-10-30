@@ -25,7 +25,6 @@ export class SessionState {
   public completedTurnsCount = 0;
   public customTitle?: string;
   public titleGeneratedAtTurn = 0;
-  public debugCostEnabled = false;
 
   constructor(
     initialSettings: GlitchSettings,

@@ -11,7 +11,6 @@ import {
   buildCostRequestRecord,
   calculateApiUsageCostUsd,
   computeLastRequestContextTokens,
-  formatCostAuditReport,
   hasAnyApiTokenUsage,
   hasValidModelPricing,
   mergeStreamChunkUsage,
@@ -468,20 +467,6 @@ export async function runSingleTurn(
         turnHasUnknownCost,
         lastApiPromptTokens: session.lastApiPromptTokenCount,
       });
-
-      if (session.debugCostEnabled) {
-        const reportLine = formatCostAuditReport(
-          [rec],
-          committedTurnCostUsd,
-          session.costRecords.reduce<number | null>((acc, r) => {
-            if (r.costUsd === null) return null;
-            return (acc ?? 0) + r.costUsd;
-          }, 0),
-          modelId,
-          session.settings.modelPricing,
-        );
-        options.onSystemNotice?.(reportLine.slice(1, -1).join('\n'));
-      }
     };
 
     const closeCurrentThinkingBlock = async (
