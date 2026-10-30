@@ -182,37 +182,29 @@ describe('Etapa 2: Modelos, /model, /effort y barra de estado', () => {
 
   it('renderiza la barra inferior con el nombre físico del modelo y Esfuerzo, y la barra superior del chat con Modo/Sub-Modo y % de contexto/MCP/skills', () => {
     const bar = formatStatusBar(baseSettings);
-    expect(bar).toBe('Modelo: Gemini 4 Argon | Esfuerzo: MEDIUM');
+    expect(bar).toBe('Gemini 4 Argon | Esfuerzo: Medio');
 
     const topLeftPlan = formatInputTopLeftMode({
       ...baseSettings,
       subMode: 'plan',
     });
-    expect(topLeftPlan).toBe('Always Allow · Sub-Modo: Plan (Shift+Tab)');
+    expect(topLeftPlan).toBe('Always Allow · Sub-Modo: Plan');
 
     const topLeftAgente = formatInputTopLeftMode({
       ...baseSettings,
       subMode: 'agent',
-      language: 'es',
     });
-    expect(topLeftAgente).toBe('Always Allow · Sub-Modo: Agente (Shift+Tab)');
+    expect(topLeftAgente).toBe('Always Allow · Sub-Modo: Agente');
 
-    const topLeftEn = formatInputTopLeftMode({
-      ...baseSettings,
-      subMode: 'agent',
-      language: 'en',
-    });
-    expect(topLeftEn).toBe('Always Allow · Sub-Mode: Agent (Shift+Tab)');
-
-    const topRight = formatInputTopRightInfo([], 3, 73);
-    expect(topRight).toBe('100% contexto restante · 3 MCP activos · 73 skills');
+    const topRight = formatInputTopRightInfo([], 3, 2, 0, 6_300);
+    expect(topRight).toBe('context: 6.3k / 1M . 3 MCP . 2 SKILLS');
 
     const noEffortBar = formatStatusBar({
       ...baseSettings,
       model: 'gemma-3-27b-it',
       subMode: 'plan',
     });
-    expect(noEffortBar).toBe('Modelo: Gemma 3 27B IT | Esfuerzo: N/A');
+    expect(noEffortBar).toBe('Gemma 3 27B IT | Esfuerzo: N/A');
   });
 
   it('separa los modelos en páginas limpias (Gemini, Gemma, Nano Banana, Embeddings), ordenados por fecha descendente y formatea NOMBRE (active) | ID | FECHA | ESFUERZO (LOW - MEDIUM - HIGH)', () => {

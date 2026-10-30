@@ -26,6 +26,13 @@ const SAFE_ACTION_PATTERNS = [
   /^glob/i,
   /^inspect/i,
   /^status/i,
+  /^activate_skill/i,
+  /^ask_user/i,
+  /^spawn_subagent/i,
+  /^spawn_parallel_subagents/i,
+  /^esperar_subagentes/i,
+  /^cerrar_bloque/i,
+  /^delegate_task/i,
 ];
 
 const INSECURE_ACTION_PATTERNS = [
@@ -34,6 +41,7 @@ const INSECURE_ACTION_PATTERNS = [
   /^remove/i,
   /^rm/i,
   /^exec/i,
+  /^run_shell/i,
   /^shell/i,
   /^bash/i,
   /^cmd/i,
@@ -81,6 +89,14 @@ export function checkPermission(
   permissionMode: PermissionMode,
   subMode: SubMode = 'agent',
 ): PermissionResult {
+  const rawName = typeof action === 'string' ? action.trim() : action.name.trim();
+  if (rawName.toLowerCase() === 'cerrar_bloque') {
+    return {
+      decision: 'allow',
+      risk: 'safe',
+      reason: 'Herramienta interna cerrar_bloque permitida sin confirmación.',
+    };
+  }
   const risk = classifyActionRisk(action);
   const modifies = doesActionModifyState(action);
 

@@ -15,8 +15,8 @@ export function formatCleanApiError(err: unknown): string {
     }
   }
 
-  // Quita prefijos como "✗ Error: " o "Error: " antes de intentar parsear JSON
-  currentMessage = currentMessage.replace(/^[✗x]\s*Error:\s*/i, '').trim();
+  // Quita prefijos como "Error: " antes de intentar parsear JSON
+  currentMessage = currentMessage.replace(/^[x]\s*Error:\s*/i, '').trim();
 
   for (let depth = 0; depth < 5; depth++) {
     const jsonCandidate = extractJsonSubstring(currentMessage);

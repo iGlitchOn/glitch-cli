@@ -1,215 +1,229 @@
-import os from 'node:os';
-import React, { useState, useEffect, useRef } from 'react';
-import { Box, Static, Text, useApp, useInput } from 'ink';
-import type { Part } from '@google/genai';
-import {
-  formatAuthSummary,
-  formatPermissionModeLabel,
-  formatSubModeLabel,
-  isAuthConfigured,
-  maskApiKey,
-  saveSettings,
-  type AppLanguage,
-  type CustomEndpointFormat,
-  type EffortLevel,
-  type GlitchSettings,
-  type PermissionMode,
-  type SubMode,
-} from '../config/settings.js';
-import {
-  LOCAL_GOOGLE_MODELS,
-  formatModelRowColumns,
-  getModelDefinition,
-  groupModelsByFamilyPages,
-  listVertexGoogleModels,
-  type ModelDefinition,
-} from '../config/models.js';
-import { runEffortCommand } from '../commands/effort.js';
-import { parseModelAndEffortArgs } from '../commands/model.js';
-import { getSettingHelpDetail } from '../commands/settings.js';
-import {
-  SLASH_COMMANDS,
-  matchSlashCommands,
-  resolveSlashCommandAlias,
-} from '../commands/slashRegistry.js';
-import { toggleSubMode } from '../permissions/permissions.js';
-import {
-  GLITCH_ASCII_LINES,
-  GLITCH_MINI_LOGO_LINES,
-  formatClaudeStyleHeaderInfo,
-} from './banner.js';
-import {
-  detectEnvironmentCounts,
-  estimateTurnCostUsd,
-  formatInputTopLeftMode,
-  formatInputTopRightInfo,
-  formatSessionCostSummary,
-  formatStatusBar,
-} from './statusBar.js';
-import {
-  formatCleanApiError,
-  formatElapsedDuration,
-  formatMessageTimestamp,
-} from '../core/errorFormat.js';
+import React, { useState, useRef, useMemo } from 'react';
+import { Box, Text, useApp, useInput, usePaste, useStdin, useStdout, type DOMElement } from 'ink';
+import { getAppVersion, isAuthConfigured, saveSettings, type GlitchSettings } from '../config/settings.js';
+import { LOCAL_GOOGLE_MODELS, getModelContextWindow, groupModelsByFamilyPages, listVertexGoogleModels, type ModelDefinition } from '../config/models.js';
+import { matchSlashCommands } from '../commands/slashRegistry.js';
+import { computeChatCostSummary, computeContextUsageBreakdown, type CostRequestRecord } from './statusBar.js';
+import { BRACKETED_PASTE_START, BracketedPasteParser, normalizePastedText, readWindowsClipboard, snapshotPastedImageMap } from '../core/clipboard.js';
+import { createCompactionTracker, type CompactionTracker } from '../core/compaction.js';
+import { InputUndoManager, applyBracketedPasteToEditor, insertTextAtCursor, type LineEditorState } from '../core/lineEditor.js';
+import { discoverMcpServers, type McpServerEntry } from '../core/mcpRegistry.js';
 import { SessionState } from '../core/session.js';
-import {
-  createSessionId,
-  deriveSessionTitle,
-  listSavedSessions,
-  saveSessionToDisk,
-  type SavedSession,
-  type SavedUiMessage,
-} from '../core/sessionStore.js';
-import {
-  VertexProviderAdapter,
-  createVertexGenAI,
-} from '../providers/vertex.js';
-import { CustomProviderAdapter } from '../providers/custom.js';
-import type { ProviderAdapter } from '../providers/types.js';
-
-type ActiveDialog =
-  | 'none'
-  | 'auth'
-  | 'model'
-  | 'settings'
-  | 'resume'
-  | 'agents_chats';
-
+import { createSessionId, countRealUserTurns, deriveSessionTitle, listSavedSessions, saveSessionToDisk, scheduleSaveSessionToDisk, type SavedSession, type SavedUiMessage } from '../core/sessionStore.js';
+import { discoverInstalledSkills, type SkillInfo } from '../core/skills.js';
+import type { LiveSubagentInfo } from '../core/subagents.js';
+import { createVertexGenAI } from '../providers/vertex.js';
+import type { ApiTokenUsage } from '../providers/types.js';
+import { AgentsPanelView, type ActiveTerminalChatEntry } from './AgentsPanelView.js';
+import { ChatHistoryView, type NumberedUiMessage } from './ChatHistoryView.js';
+import { DaaSplashView, DialogsView, type ActiveDialog, type PendingAskUserPrompt } from './DialogsView.js';
+import { HeaderBanner } from './HeaderBanner.js';
+import { InputBoxView } from './InputBoxView.js';
+import { buildLineLinkMap } from './markdownTokens.js';
+import { StatusBarBottom, StatusBarTop } from './StatusBarView.js';
+import { executeTuiInputCommand, handleActiveDialogInput, handleMainEditorKeyInput } from './tuiInputHandlers.js';
+import { computeEffectiveScrollTop, computeScrollbarThumb, dispatchSgrMouseEvents, formatScrollToBottomLabel, readTerminalSize, scrollChatStateBy, shouldShowHeaderForRows, shouldShowScrollToBottomButton, type ChatScrollState, type SgrMouseEvent } from './tuiScrollMouse.js';
+import { useTerminalEffects } from './useTerminalEffects.js';
+import { createTurnPromptActions } from './useTurnPromptRunner.js';
+export * from './tuiScrollMouse.js';
 export interface TuiAppProps {
   initialSettings: GlitchSettings;
   version?: string;
   launchedWithDaaFlag?: boolean;
+  initialPrompt?: string;
 }
-
 export const TuiApp: React.FC<TuiAppProps> = ({
   initialSettings,
-  version = '0.1.0',
+  version = getAppVersion(),
   launchedWithDaaFlag = false,
+  initialPrompt,
 }) => {
   const { exit } = useApp();
-  const columns = process.stdout.columns ?? 100;
-
+  const { stdout } = useStdout();
+  const { stdin } = useStdin();
+  const [termSize, setTermSize] = useState(() => readTerminalSize(stdout));
+  const columns = termSize.columns;
+  const rows = termSize.rows;
+  const chatViewportRef = useRef<DOMElement>(null);
+  const chatContentRef = useRef<DOMElement>(null);
+  const [scrollState, setScrollState] = useState<ChatScrollState>({ scrollTop: 0, isAtBottom: true });
+  const scrollStateRef = useRef<ChatScrollState>({ scrollTop: 0, isAtBottom: true });
+  const maxScrollTopRef = useRef<number>(0);
   const sessionRef = useRef<SessionState>(new SessionState(initialSettings));
   const [sessionId, setSessionId] = useState<string>(() => createSessionId());
-  const [staticEpoch, setStaticEpoch] = useState(0);
   const sessionCreatedAtRef = useRef<string>(new Date().toISOString());
-  const [envCounts] = useState(() => detectEnvironmentCounts());
-
+  const [installedSkills] = useState<SkillInfo[]>(() => discoverInstalledSkills());
+  const [mcpServers] = useState<McpServerEntry[]>(() => discoverMcpServers());
+  const [activeSkillNames, setActiveSkillNames] = useState<string[]>([]);
+  const activeSkillContentsRef = useRef<Map<string, string>>(new Map());
+  const syncActiveSkillsFromSet = (namesSet: Set<string>) => {
+    const nextMap = new Map<string, string>();
+    for (const s of installedSkills) {
+      if (namesSet.has(s.name)) nextMap.set(s.name, s.content);
+    }
+    activeSkillContentsRef.current = nextMap;
+    setActiveSkillNames(Array.from(nextMap.keys()));
+  };
   const [settings, setSettings] = useState<GlitchSettings>(initialSettings);
-  const lang: AppLanguage = settings.language ?? 'es';
-
-  const [availableModels, setAvailableModels] = useState(
-    sessionRef.current.availableModels,
-  );
-
-  // El aviso TUI de 3 segundos SOLO se muestra si se pasó la flag explícita (--DAA / --dangerously-always-allow)
-  const shouldShowDaaSplash =
-    launchedWithDaaFlag && !initialSettings.hideDaaWarning;
+  const [availableModels, setAvailableModels] = useState(sessionRef.current.availableModels);
   const [daaSplashSeconds, setDaaSplashSeconds] = useState<number>(
-    shouldShowDaaSplash ? 3 : 0,
+    launchedWithDaaFlag && !initialSettings.hideDaaWarning ? 3 : 0,
   );
-
   const [messages, setMessages] = useState<SavedUiMessage[]>([]);
+  const messagesRef = useRef<SavedUiMessage[]>([]);
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [inputText, setInputText] = useState('');
+  const [inputCursor, setInputCursor] = useState(0);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isCompactingContext, setIsCompactingContext] = useState(false);
+  const compactionTrackerRef = useRef<CompactionTracker>(createCompactionTracker());
+  const [editingThresholdMode, setEditingThresholdMode] = useState(false);
+  const [thresholdBuffer, setThresholdBuffer] = useState('');
+  const [thresholdError, setThresholdError] = useState('');
   const [streamingElapsedMs, setStreamingElapsedMs] = useState(0);
   const streamStartTimeRef = useRef<number>(0);
   const abortControllerRef = useRef<AbortController | null>(null);
-
   const [liveThought, setLiveThought] = useState('');
   const [liveText, setLiveText] = useState('');
-  const [sessionCostUsd, setSessionCostUsd] = useState(0);
-  const [lastTurnCostUsd, setLastTurnCostUsd] = useState(0);
+  const [thoughtsCollapsed, setThoughtsCollapsed] = useState<boolean | null>(null);
+  const [perMessageCollapsed, setPerMessageCollapsed] = useState<Record<string, boolean>>({});
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [transientStatusNotice, setTransientStatusNotice] = useState('');
+  const [seenMsgCountAtBottom, setSeenMsgCountAtBottom] = useState(0);
+  const [sessionCostUsd, setSessionCostUsd] = useState<number | null>(null);
+  const [lastTurnCostUsd, setLastTurnCostUsd] = useState<number | null>(null);
+  const [currentTurnCostUsd, setCurrentTurnCostUsd] = useState<number | null>(null);
+  const [costRecords, setCostRecords] = useState<CostRequestRecord[]>([]);
+  const [liveInFlightUsage, setLiveInFlightUsage] = useState<ApiTokenUsage | undefined>(undefined);
+  const [liveInFlightModelId, setLiveInFlightModelId] = useState<string | undefined>(undefined);
+  const [lastApiPromptTokens, setLastApiPromptTokens] = useState<number | null>(null);
   const [lastTurnDurationText, setLastTurnDurationText] = useState('0s');
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(() =>
     isAuthConfigured(initialSettings) ? 'none' : 'auth',
   );
   const [suggestionIdx, setSuggestionIdx] = useState(0);
-
-  // Confirmación de salida con doble Ctrl+C
   const [ctrlCPending, setCtrlCPending] = useState(false);
-
-  // Cola FIFO de prompts en espera, edición con ↑/↓ y confirmación de borrado TUI
   const queueRef = useRef<string[]>([]);
   const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
   const [editingQueueIdx, setEditingQueueIdx] = useState<number | null>(null);
-  const [confirmDeleteQueueIdx, setConfirmDeleteQueueIdx] = useState<
-    number | null
-  >(null);
+  const [confirmDeleteQueueIdx, setConfirmDeleteQueueIdx] = useState<number | null>(null);
   const originalEditingQueueTextRef = useRef<string>('');
   const draftInputRef = useRef<string>('');
-
-  // Estado del diálogo /auth
   const [authStep, setAuthStep] = useState<
-    | 'provider'
-    | 'vertex_project'
-    | 'vertex_location'
-    | 'custom_url'
-    | 'custom_key'
-    | 'custom_format'
+    'provider' | 'vertex_project' | 'vertex_location' | 'custom_url' | 'custom_key' | 'custom_format'
   >('provider');
   const [authChoiceIdx, setAuthChoiceIdx] = useState(0);
   const [authBuffer, setAuthBuffer] = useState('');
   const [tempProject, setTempProject] = useState(
     initialSettings.vertex?.project || process.env['GOOGLE_CLOUD_PROJECT'] || '',
   );
-  const [tempUrl, setTempUrl] = useState(
-    initialSettings.custom?.baseUrl || 'https://api.openai.com',
-  );
+  const [tempUrl, setTempUrl] = useState(initialSettings.custom?.baseUrl || 'https://api.openai.com');
   const [tempKey, setTempKey] = useState('');
-
-  // Estado de diálogos /model, /settings, /resume y panel de agentes/chats (←)
   const [dialogCursor, setDialogCursor] = useState(0);
   const [modelPageIdx, setModelPageIdx] = useState(0);
-  const [pendingModelForEffort, setPendingModelForEffort] =
-    useState<ModelDefinition | null>(null);
+  const [pendingModelForEffort, setPendingModelForEffort] = useState<ModelDefinition | null>(null);
   const [modelEffortIdx, setModelEffortIdx] = useState(0);
   const [savedSessionsList, setSavedSessionsList] = useState<SavedSession[]>([]);
-
+  const [liveSubagents, setLiveSubagents] = useState<LiveSubagentInfo[]>([]);
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
+  const [correctionInputText, setCorrectionInputText] = useState('');
+  const [pendingRelaunchConfirm, setPendingRelaunchConfirm] = useState(false);
+  const [showAllHistorySessions, setShowAllHistorySessions] = useState(false);
+  const [showAllAgentsHistory, setShowAllAgentsHistory] = useState(false);
+  const [agentsPanelNotice, setAgentsPanelNotice] = useState('');
+  const activeChatsMapRef = useRef<Map<string, { session: SessionState; messages: SavedUiMessage[]; createdAt: string }>>(new Map());
+  const [pendingAskUser, setPendingAskUser] = useState<PendingAskUserPrompt | null>(null);
+  const [askUserCursor, setAskUserCursor] = useState(0);
+  const [askUserCustomText, setAskUserCustomText] = useState('');
+  const [askUserCustomCursor, setAskUserCustomCursor] = useState(0);
+  const [askUserTypingCustom, setAskUserTypingCustom] = useState(false);
+  const lastSubagentUiFlushRef = useRef<number>(0);
+  const upsertLiveSubagent = (info: LiveSubagentInfo) => {
+    const now = Date.now();
+    if (info.status === 'running' && now - lastSubagentUiFlushRef.current < 100) return;
+    lastSubagentUiFlushRef.current = now;
+    setLiveSubagents((prev) => {
+      const idx = prev.findIndex((s) => s.id === info.id);
+      if (idx === -1) return [...prev.slice(-19), info];
+      const next = [...prev];
+      next[idx] = info;
+      return next;
+    });
+  };
+  const inputStateRef = useRef<LineEditorState>({ text: '', cursor: 0 });
+  const askUserCustomStateRef = useRef<LineEditorState>({ text: '', cursor: 0 });
+  const inputUndoManagerRef = useRef<InputUndoManager>(new InputUndoManager(100));
+  const askUserUndoManagerRef = useRef<InputUndoManager>(new InputUndoManager(100));
+  const bracketedPasteParserRef = useRef<BracketedPasteParser>(new BracketedPasteParser());
+  const lastPasteTimeRef = useRef<number>(0);
+  const applyInputState = (next: LineEditorState) => {
+    inputStateRef.current = next;
+    setInputText(next.text);
+    setInputCursor(next.cursor);
+  };
+  const setFullInputText = (text: string) => applyInputState({ text, cursor: text.length });
+  const applyAskUserCustomState = (next: LineEditorState) => {
+    askUserCustomStateRef.current = next;
+    setAskUserCustomText(next.text);
+    setAskUserCustomCursor(next.cursor);
+  };
+  const updateScrollState = (next: ChatScrollState) => {
+    scrollStateRef.current = next;
+    setScrollState(next);
+    if (next.isAtBottom) setSeenMsgCountAtBottom(messagesRef.current.length);
+  };
+  const readCurrentMaxScrollTop = (): number => {
+    const vpLayoutH = chatViewportRef.current?.yogaNode?.getComputedLayout().height ?? 0;
+    const contLayoutH = chatContentRef.current?.yogaNode?.getComputedLayout().height ?? 0;
+    if (vpLayoutH > 0 && contLayoutH >= 0) return Math.max(0, contLayoutH - vpLayoutH);
+    return maxScrollTopRef.current;
+  };
+  const scrollChatBy = (deltaRows: number) => {
+    updateScrollState(scrollChatStateBy(scrollStateRef.current, deltaRows, readCurrentMaxScrollTop()));
+  };
   const modelPages = groupModelsByFamilyPages(availableModels);
-
   const syncSettings = (next: GlitchSettings) => {
     sessionRef.current.settings = next;
     setSettings({ ...next });
     saveSettings(next);
   };
-
-  const persistCurrentSession = (
-    nextMessages: SavedUiMessage[],
-    currentId = sessionId,
-  ) => {
+  const persistCurrentSession = (nextMessages: SavedUiMessage[], currentId = sessionId, syncImmediate = false) => {
     const history = sessionRef.current.history;
     if (history.length === 0) return;
-    const curSettings = sessionRef.current.settings;
-    saveSessionToDisk({
+    const cur = sessionRef.current;
+    const curSettings = cur.settings;
+    const payload: SavedSession = {
       id: currentId,
-      title: deriveSessionTitle(nextMessages, history),
+      title: deriveSessionTitle(nextMessages, history, cur.customTitle),
+      customTitle: cur.customTitle,
+      completedTurnsCount: cur.completedTurnsCount,
+      titleGeneratedAtTurn: cur.titleGeneratedAtTurn,
       createdAt: sessionCreatedAtRef.current,
       updatedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
       model: curSettings.model,
       effort: curSettings.effort,
       history: [...history],
       messages: nextMessages.filter((m) => m.role !== 'system'),
+      sessionCostUsd: cur.sessionCostUsd,
+      costRecords: [...cur.costRecords],
+      lastApiPromptTokens: cur.lastApiPromptTokenCount,
+    };
+    if (syncImmediate) saveSessionToDisk(payload);
+    else scheduleSaveSessionToDisk(payload);
+  };
+  const addSystemMessage = (text: string) => {
+    setMessages((prev) => {
+      const next: SavedUiMessage[] = [...prev, { id: `${Date.now()}-${Math.random()}`, role: 'system', text }];
+      messagesRef.current = next;
+      return next;
     });
   };
-
-  const addSystemMessage = (text: string) => {
-    setMessages((prev) => [
-      ...prev,
-      { id: `${Date.now()}-${Math.random()}`, role: 'system', text },
-    ]);
-  };
-
-  const syncQueueState = () => {
-    setQueuedPrompts([...queueRef.current]);
-  };
-
+  const syncQueueState = () => setQueuedPrompts([...queueRef.current]);
   const refreshModels = async (cfg: GlitchSettings) => {
     if (cfg.provider === 'vertex' && cfg.vertex) {
       try {
-        const ai = createVertexGenAI(cfg.vertex);
-        const list = await listVertexGoogleModels(ai);
+        const list = await listVertexGoogleModels(createVertexGenAI(cfg.vertex));
         sessionRef.current.availableModels = list;
         setAvailableModels([...list]);
       } catch {
@@ -218,1782 +232,368 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       }
     }
   };
-
-  useEffect(() => {
-    if (daaSplashSeconds <= 0) return;
-    const timer = setTimeout(() => {
-      if (daaSplashSeconds === 1) {
-        setDaaSplashSeconds(0);
-        addSystemMessage(
-          lang === 'en'
-            ? '⚠ --DAA flag active: to disable this 3s startup notice, configure it in /settings.'
-            : '⚠ Flag --DAA activa: si quieres desactivar este mensaje inicial de 3 segundos, configúralo en /ajustes (Advertencia --DAA al inicio: OFF).',
-        );
-      } else {
-        setDaaSplashSeconds((prev) => prev - 1);
-      }
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [daaSplashSeconds]);
-
-  // Cronómetro en tiempo real para "Pensando... ("ESC" para cancelar, 1h 30m)"
-  useEffect(() => {
-    if (!isStreaming) {
-      setStreamingElapsedMs(0);
-      return;
-    }
-    const interval = setInterval(() => {
-      setStreamingElapsedMs(Date.now() - streamStartTimeRef.current);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [isStreaming]);
-
-  // Temporizador para limpiar el estado de confirmación de doble Ctrl+C tras 3 segundos
-  useEffect(() => {
-    if (!ctrlCPending) return;
-    const timer = setTimeout(() => {
-      setCtrlCPending(false);
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, [ctrlCPending]);
-
-  useEffect(() => {
-    if (isAuthConfigured(initialSettings)) {
-      void refreshModels(initialSettings);
-    }
-  }, []);
-
-  const matchingSlash =
-    activeDialog === 'none' && confirmDeleteQueueIdx === null
-      ? matchSlashCommands(inputText)
-      : [];
-
-  const buildAdapter = (): ProviderAdapter => {
-    const cur = sessionRef.current.settings;
-    if (cur.provider === 'custom' && cur.custom) {
-      return new CustomProviderAdapter(cur.custom);
-    }
-    if (cur.provider === 'vertex' && cur.vertex) {
-      const ai = createVertexGenAI(cur.vertex);
-      return new VertexProviderAdapter(ai);
-    }
-    throw new Error('Autenticación no configurada. Usa /auth primero.');
-  };
-
-  const runSinglePromptNow = async (userPrompt: string): Promise<void> => {
-    const session = sessionRef.current;
-    session.isRequestActive = true;
-    const startTs = Date.now();
-    streamStartTimeRef.current = startTs;
-    setStreamingElapsedMs(0);
-    setIsStreaming(true);
-    setLiveThought('');
-    setLiveText('');
-
-    const abortController = new AbortController();
-    abortControllerRef.current = abortController;
-
-    const userMsg: SavedUiMessage = {
-      id: `${Date.now()}-${Math.random()}-u`,
-      role: 'user',
-      text: userPrompt,
-      timestamp: formatMessageTimestamp(new Date()),
-    };
-    setMessages((prev) => [...prev, userMsg]);
-    session.history.push({ role: 'user', parts: [{ text: userPrompt }] });
-
-    try {
-      const live = session.getLiveCallConfig();
-      const adapter = buildAdapter();
-      const collectedParts: Part[] = [];
-      let accText = '';
-      let accThought = '';
-
-      for await (const chunk of adapter.streamTurn(session.history, {
-        model: live.model,
-        effort: live.effort,
-        includeThoughts: live.includeThoughts,
-        subMode: live.subMode,
-        abortSignal: abortController.signal,
-      })) {
-        if (abortController.signal.aborted) {
-          break;
-        }
-        if (chunk.rawParts && chunk.rawParts.length > 0) {
-          collectedParts.push(...chunk.rawParts);
-        }
-        if (chunk.thoughtText) {
-          accThought += chunk.thoughtText;
-          setLiveThought(accThought);
-        }
-        if (chunk.text) {
-          accText += chunk.text;
-          setLiveText(accText);
-        }
-      }
-
-      const elapsed = formatElapsedDuration(Date.now() - startTs);
-      const turnCost = estimateTurnCostUsd(
-        userPrompt.length,
-        accText.length,
-        accThought.length,
-      );
-      setLastTurnCostUsd(turnCost);
-      setLastTurnDurationText(elapsed);
-      setSessionCostUsd((prev) => prev + turnCost);
-
-      if (abortController.signal.aborted) {
-        const cancelNote =
-          lang === 'en' ? '[Cancelled with ESC]' : '[Cancelado con ESC]';
-        const finalText = accText ? `${accText} ${cancelNote}` : cancelNote;
-        session.history.push({
-          role: 'model',
-          parts: [{ text: finalText }],
-        });
-        const cancelledMsg: SavedUiMessage = {
-          id: `${Date.now()}-${Math.random()}-m`,
-          role: 'model',
-          text: finalText,
-          thoughtText: accThought || undefined,
-          durationText: elapsed,
-        };
-        setMessages((prev) => {
-          const next = [...prev, cancelledMsg];
-          persistCurrentSession(next);
-          return next;
-        });
-        return;
-      }
-
-      session.history.push({
-        role: 'model',
-        parts:
-          collectedParts.length > 0
-            ? collectedParts
-            : [{ text: accText }],
-      });
-
-      const modelMsg: SavedUiMessage = {
-        id: `${Date.now()}-${Math.random()}-m`,
-        role: 'model',
-        text: accText || '(sin respuesta de texto)',
-        thoughtText: accThought || undefined,
-        durationText: elapsed,
-      };
-      setMessages((prev) => {
-        const next = [...prev, modelMsg];
-        persistCurrentSession(next);
-        return next;
-      });
-    } catch (err) {
-      if (abortController.signal.aborted) {
-        addSystemMessage(
-          lang === 'en'
-            ? '⚠ Request cancelled by user (ESC).'
-            : '⚠ Petición cancelada por el usuario (ESC).',
-        );
-      } else {
-        addSystemMessage(formatCleanApiError(err));
-      }
-    } finally {
-      abortControllerRef.current = null;
+  const handlePastedTextBlock = (rawText: string) => {
+    if (!rawText || daaSplashSeconds > 0) return;
+    lastPasteTimeRef.current = Date.now();
+    const normalized = normalizePastedText(rawText);
+    if (!normalized) return;
+    if (activeDialog === 'ask_user' && askUserTypingCustom) {
+      applyAskUserCustomState(applyBracketedPasteToEditor(askUserCustomStateRef.current, normalized, askUserUndoManagerRef.current, Date.now()));
+    } else if (activeDialog === 'auth') {
+      setAuthBuffer((prev) => `${prev}${normalized.replace(/[\r\n]+/g, '')}`);
+    } else if (activeDialog === 'none') {
+      if (showShortcutsPanel) setShowShortcutsPanel(false);
+      applyInputState(applyBracketedPasteToEditor(inputStateRef.current, normalized, inputUndoManagerRef.current, Date.now()));
+      setSuggestionIdx(0);
     }
   };
-
-  const startOrEnqueuePrompt = (userPrompt: string) => {
-    const session = sessionRef.current;
-
-    if (session.isRequestActive) {
-      queueRef.current.push(userPrompt);
-      syncQueueState();
-      return;
-    }
-
-    void (async () => {
-      await runSinglePromptNow(userPrompt);
-      while (queueRef.current.length > 0) {
-        const nextPrompt = queueRef.current.shift()!;
-        setEditingQueueIdx((currIdx) => {
-          if (currIdx === null) return null;
-          return currIdx > 0 ? currIdx - 1 : null;
-        });
-        syncQueueState();
-        await runSinglePromptNow(nextPrompt);
+  const handleClipboardPaste = () => {
+    if (Date.now() - lastPasteTimeRef.current < 40) return;
+    const beforeRefs = snapshotPastedImageMap();
+    const clip = readWindowsClipboard();
+    if (clip.kind === 'image' && clip.displayTag) {
+      lastPasteTimeRef.current = Date.now();
+      const inserted = `${clip.displayTag} `;
+      if (activeDialog === 'ask_user' && askUserTypingCustom) {
+        const beforeState = askUserCustomStateRef.current;
+        const nextState = insertTextAtCursor(beforeState, inserted);
+        askUserUndoManagerRef.current.recordEdit(beforeState, nextState, 'paste', inserted, Date.now(), beforeRefs);
+        applyAskUserCustomState(nextState);
+      } else if (activeDialog === 'none') {
+        const beforeState = inputStateRef.current;
+        const nextState = insertTextAtCursor(beforeState, inserted);
+        inputUndoManagerRef.current.recordEdit(beforeState, nextState, 'paste', inserted, Date.now(), beforeRefs);
+        applyInputState(nextState);
       }
-      session.isRequestActive = false;
-      setIsStreaming(false);
-      setLiveThought('');
-      setLiveText('');
-    })();
+    } else if (clip.kind === 'text' && clip.value) {
+      handlePastedTextBlock(clip.value);
+    }
   };
-
-  const openAgentsAndChatsDrawer = () => {
-    persistCurrentSession(messages);
-    const saved = listSavedSessions();
+  const showTransientNotice = (msg: string, ms = 2000) => {
+    setTransientStatusNotice(msg);
+    setTimeout(() => setTransientStatusNotice(''), ms);
+  };
+  const lineLinkMap = useMemo(() => buildLineLinkMap(messages.flatMap((m) => m.text.split(/\r?\n/))), [messages]);
+  const openAgentsPanelNow = (saved = listSavedSessions()) => {
+    persistCurrentSession(messagesRef.current, sessionId, true);
+    activeChatsMapRef.current.set(sessionId, {
+      session: sessionRef.current,
+      messages: [...messagesRef.current],
+      createdAt: sessionCreatedAtRef.current,
+    });
     setSavedSessionsList(saved);
-    setDialogCursor(0);
+    setSelectedSubagentId(null);
+    setCorrectionInputText('');
+    setPendingRelaunchConfirm(false);
+    setAgentsPanelNotice('');
+    setDialogCursor(1);
     setActiveDialog('agents_chats');
   };
-
-  const executeInputCommand = (raw: string) => {
-    const trimmed = raw.trim();
-    if (!trimmed) return;
-
-    const resolved = trimmed.startsWith('/')
-      ? resolveSlashCommandAlias(trimmed)
-      : trimmed;
-
-    if (resolved === '/exit') {
-      persistCurrentSession(messages);
-      exit();
-      return;
-    }
-
-    if (resolved === '/help' || resolved === '?') {
-      setShowShortcutsPanel((prev) => !prev);
-      return;
-    }
-
-    if (resolved === '/new') {
-      persistCurrentSession(messages);
-      sessionRef.current.history.length = 0;
-      const nextId = createSessionId();
-      sessionCreatedAtRef.current = new Date().toISOString();
-      if (process.stdout.isTTY) {
-        process.stdout.write('\x1b[2J\x1b[H');
-      }
-      setSessionId(nextId);
-      setMessages([]);
-      setStaticEpoch((prev) => prev + 1);
-      setShowShortcutsPanel(false);
-      return;
-    }
-
-    if (resolved === '/resume' || resolved.startsWith('/resume ')) {
-      const arg = resolved.slice('/resume'.length).trim();
-      persistCurrentSession(messages);
-      const list = listSavedSessions();
-      if (list.length === 0) {
-        addSystemMessage(
-          lang === 'en'
-            ? 'ℹ No saved conversations yet to resume.'
-            : 'ℹ No hay conversaciones guardadas todavía para retomar.',
-        );
-        return;
-      }
-      if (arg) {
-        const byIdx = Number.parseInt(arg, 10);
-        const found =
-          !Number.isNaN(byIdx) && byIdx >= 1 && byIdx <= list.length
-            ? list[byIdx - 1]
-            : list.find((s) => s.id === arg);
-        if (!found) {
-          addSystemMessage(`✗ No se encontró la conversación "${arg}".`);
-          return;
+  const handleSgrMouseEvents = (events: SgrMouseEvent[]) => {
+    dispatchSgrMouseEvents({
+      events, columns, rows, lineLinkMap, messages: messagesRef.current,
+      isAtBottom: scrollStateRef.current.isAtBottom,
+      readMaxScrollTop: readCurrentMaxScrollTop, updateScrollState,
+      showTransientNotice, setThoughtsCollapsed,
+      setCopiedMessageId: (id) => {
+        setCopiedMessageId(id);
+        setTimeout(() => setCopiedMessageId(null), 2000);
+      },
+      togglePerMessageCollapsed: (id) => setPerMessageCollapsed((prev) => ({ ...prev, [id]: !prev[id] })),
+      onOpenAgentsPanel: () => openAgentsPanelNow(),
+      onToggleShortcuts: () => setShowShortcutsPanel((prev) => !prev),
+      onOpenModelDialog: () => {
+        if (!sessionRef.current.isRequestActive) {
+          setPendingModelForEffort(null);
+          setDialogCursor(0);
+          setActiveDialog('model');
         }
-        sessionRef.current.history.length = 0;
-        sessionRef.current.history.push(...found.history);
-        setSessionId(found.id);
-        sessionCreatedAtRef.current = found.createdAt;
-        setMessages([
-          ...found.messages,
-          {
-            id: `${Date.now()}-resumed`,
-            role: 'system',
-            text: `✓ Conversación retomada: "${found.title}" (${found.history.length} turnos).`,
-          },
-        ]);
-        return;
-      }
-      setSavedSessionsList(list);
-      setDialogCursor(0);
-      setActiveDialog('resume');
-      return;
-    }
-
-    if (resolved === '/auth') {
-      setAuthStep('provider');
-      setAuthChoiceIdx(0);
-      setAuthBuffer('');
-      setActiveDialog('auth');
-      return;
-    }
-
-    if (resolved === '/settings') {
-      setDialogCursor(0);
-      setActiveDialog('settings');
-      return;
-    }
-
-    if (resolved === '/model' || resolved.startsWith('/model ')) {
-      if (sessionRef.current.isRequestActive) {
-        addSystemMessage(
-          lang === 'en'
-            ? '⚠ Cannot switch model while a request is active. Wait for the current task to finish.'
-            : '⚠ No puedes cambiar de modelo mientras hay una petición activa. Espera a que termine la tarea actual.',
-        );
-        return;
-      }
-      const rawArgs = resolved.slice('/model'.length).trim();
-      if (rawArgs) {
-        const { modelArg, effortArg } = parseModelAndEffortArgs(rawArgs);
-        const exists = availableModels.find((m) => m.id === modelArg);
-        if (!exists && (settings.provider ?? 'vertex') === 'vertex') {
-          addSystemMessage(`✗ Modelo "${modelArg}" no disponible en Vertex AI.`);
-          return;
-        }
-        const def = getModelDefinition(modelArg, settings.provider ?? 'vertex');
-        let nextEffort = settings.effort;
-
-        if (effortArg) {
-          if (def.supportedEfforts.length === 0) {
-            addSystemMessage(
-              `⚠ ${def.name} no usa niveles de esfuerzo (ESFUERZO: N/A). Se activó el modelo sin effort.`,
-            );
-          } else if (
-            !def.supportedEfforts.includes(effortArg as EffortLevel)
-          ) {
-            addSystemMessage(
-              `✗ El esfuerzo "${effortArg}" no es válido para ${def.name}. Permitidos: ${def.supportedEfforts.map((e) => e.toUpperCase()).join(' - ')}.`,
-            );
-            return;
-          } else {
-            nextEffort = effortArg as EffortLevel;
-          }
-        } else if (
-          def.supportedEfforts.length > 0 &&
-          !def.supportedEfforts.includes(nextEffort)
-        ) {
-          nextEffort = def.defaultEffort ?? def.supportedEfforts[0]!;
-        }
-
-        const updated: GlitchSettings = {
-          ...settings,
-          model: def.id,
-          effort: nextEffort,
-        };
-        syncSettings(updated);
-        addSystemMessage(
-          `✓ Modelo cambiado a ${def.name} (${updated.model})${def.supportedEfforts.length > 0 ? ` con Esfuerzo: ${updated.effort.toUpperCase()}` : ''}.`,
-        );
-        return;
-      }
-
-      const foundPageIdx = Math.max(
-        0,
-        modelPages.findIndex((p) =>
-          p.models.some((m) => m.id === settings.model),
-        ),
-      );
-      const pageModels = modelPages[foundPageIdx]?.models ?? [];
-      const currentIdx = Math.max(
-        0,
-        pageModels.findIndex((m) => m.id === settings.model),
-      );
-      setPendingModelForEffort(null);
-      setModelPageIdx(foundPageIdx);
-      setDialogCursor(currentIdx);
-      setActiveDialog('model');
-      return;
-    }
-
-    if (resolved === '/effort' || resolved.startsWith('/effort ')) {
-      const arg = resolved.slice('/effort'.length).trim();
-      const logs: string[] = [];
-      const updated = runEffortCommand(
-        sessionRef.current.settings,
-        arg,
-        (m) => logs.push(m),
-      );
-      syncSettings(updated);
-      if (logs.length > 0) {
-        addSystemMessage(logs.join(os.EOL));
-      }
-      return;
-    }
-
-    if (resolved.startsWith('/')) {
-      addSystemMessage(
-        lang === 'en'
-          ? `✗ Unknown command: ${trimmed}. Type /help to see available commands.`
-          : `✗ Comando desconocido: ${trimmed}. Usa /ayuda para ver los comandos disponibles.`,
-      );
-      return;
-    }
-
-    if (!isAuthConfigured(sessionRef.current.settings)) {
-      addSystemMessage('⚠ Configura primero tu conexión con /auth.');
-      setActiveDialog('auth');
-      return;
-    }
-
-    startOrEnqueuePrompt(trimmed);
+      },
+      onOpenUsageDialog: () => { setDialogCursor(0); setActiveDialog('usage'); },
+      onOpenSettingsDialog: () => {
+        setDialogCursor(0); setEditingThresholdMode(false);
+        setThresholdError(''); setActiveDialog('settings');
+      },
+    });
   };
-
+  usePaste((pastedText) => handlePastedTextBlock(pastedText));
+  const matchingSlash = activeDialog === 'none' && confirmDeleteQueueIdx === null ? matchSlashCommands(inputText) : [];
+  const { startOrEnqueuePrompt, cancelCurrentTurnAndQueue, submitSubagentCorrection } = createTurnPromptActions({
+    sessionRef, streamStartTimeRef, abortControllerRef, messagesRef,
+    activeSkillContentsRef, compactionTrackerRef, askUserUndoManagerRef, queueRef,
+    installedSkills, mcpServers, setStreamingElapsedMs, setIsStreaming,
+    setLiveThought, setLiveText, setMessages, setIsCompactingContext,
+    setSettings, addSystemMessage, setLastTurnDurationText, persistCurrentSession,
+    upsertLiveSubagent, setLiveSubagents, setActiveSkillNames, setLastApiPromptTokens,
+    setCurrentTurnCostUsd, setLiveInFlightModelId, setLiveInFlightUsage,
+    setCostRecords, setLastTurnCostUsd, setSessionCostUsd, setAskUserCursor,
+    setAskUserCustomText, setAskUserCustomCursor, setAskUserTypingCustom,
+    setPendingAskUser, setActiveDialog, setEditingQueueIdx, syncQueueState,
+  });
+  const resetNewSessionUi = (nextId: string) => {
+    if (messagesRef.current.length > 0 || sessionRef.current.history.length > 0) {
+      activeChatsMapRef.current.set(sessionId, {
+        session: sessionRef.current,
+        messages: [...messagesRef.current],
+        createdAt: sessionCreatedAtRef.current,
+      });
+    }
+    sessionRef.current = new SessionState(settings, availableModels);
+    sessionCreatedAtRef.current = new Date().toISOString();
+    setSessionId(nextId); setMessages([]); messagesRef.current = [];
+    setCostRecords([]); setLiveInFlightUsage(undefined);
+    setLiveInFlightModelId(undefined); setLastApiPromptTokens(null);
+    setSessionCostUsd(null); setLastTurnCostUsd(null); setCurrentTurnCostUsd(null);
+    updateScrollState({ scrollTop: 0, isAtBottom: true }); setShowShortcutsPanel(false);
+  };
+  const switchActiveChat = (targetId: string) => {
+    activeChatsMapRef.current.set(sessionId, {
+      session: sessionRef.current,
+      messages: [...messagesRef.current],
+      createdAt: sessionCreatedAtRef.current,
+    });
+    const target = activeChatsMapRef.current.get(targetId);
+    if (!target) return;
+    sessionRef.current = target.session;
+    sessionCreatedAtRef.current = target.createdAt;
+    setSessionId(targetId);
+    setMessages([...target.messages]);
+    messagesRef.current = [...target.messages];
+    setCostRecords([...target.session.costRecords]);
+    setSessionCostUsd(target.session.sessionCostUsd);
+    setLastApiPromptTokens(target.session.lastApiPromptTokenCount);
+    updateScrollState({ scrollTop: 0, isAtBottom: true });
+  };
+  const resumeSavedSessionUi = (found: SavedSession, noticeText?: string) => {
+    sessionRef.current.restoreFromSavedSession(found);
+    setSessionId(found.id);
+    sessionCreatedAtRef.current = found.createdAt;
+    setCostRecords([...sessionRef.current.costRecords]);
+    setSessionCostUsd(sessionRef.current.sessionCostUsd);
+    setLastApiPromptTokens(sessionRef.current.lastApiPromptTokenCount);
+    setMessages([...found.messages, ...(noticeText ? [{ id: `${Date.now()}-resumed`, role: 'system' as const, text: noticeText }] : [])]);
+  };
+  const executeInputCommand = (raw: string) => {
+    executeTuiInputCommand(raw, {
+      session: sessionRef.current, settings, messages, sessionId,
+      availableModels, modelPages, installedSkills,
+      activeSkillContents: activeSkillContentsRef.current,
+      lastTurnCostUsd, sessionCostUsd, persistCurrentSession, exit,
+      setShowShortcutsPanel, addSystemMessage, resetNewSessionUi,
+      resumeSavedSessionUi, setSavedSessionsList, setDialogCursor,
+      setActiveDialog, setAuthStep, setAuthChoiceIdx, setAuthBuffer,
+      setSettings, setEditingThresholdMode, setThresholdError,
+      setPendingModelForEffort, setModelPageIdx, syncActiveSkillsFromSet,
+      startOrEnqueuePrompt,
+    });
+  };
+  useTerminalEffects({
+    stdout: stdout as NodeJS.WriteStream, stdin: stdin as NodeJS.ReadStream,
+    initialSettings, daaSplashSeconds, isStreaming, ctrlCPending, selectionMode,
+    streamStartTimeRef, inputUndoManagerRef, inputStateRef, setDaaSplashSeconds,
+    addSystemMessage, setStreamingElapsedMs, setCtrlCPending, refreshModels,
+    applyInputState, setTermSize, scrollChatBy, handleClipboardPaste,
+    onSgrMouseEvents: handleSgrMouseEvents, initialPrompt, onInitialPrompt: executeInputCommand,
+  });
   useInput((input, key) => {
-    // Doble Ctrl+C para salir de Glitch CLI
+    if (bracketedPasteParserRef.current.isPasting() || input.includes(BRACKETED_PASTE_START)) {
+      for (const seg of bracketedPasteParserRef.current.push(input)) {
+        if (seg.kind === 'paste') handlePastedTextBlock(seg.text);
+      }
+      return;
+    }
     if (key.ctrl && input.toLowerCase() === 'c') {
-      if (ctrlCPending) {
-        persistCurrentSession(messages);
-        exit();
-      } else {
-        setCtrlCPending(true);
+      if (ctrlCPending) { persistCurrentSession(messages); exit(); } else setCtrlCPending(true);
+      return;
+    }
+    const lowerInput = input.toLowerCase();
+    const isRedo = (key.ctrl && lowerInput === 'y') || input === '\x19' || (key.ctrl && key.shift && lowerInput === 'z');
+    const isUndo = !isRedo && ((key.ctrl && lowerInput === 'z') || input === '\x1a');
+    if (isUndo) {
+      if (activeDialog === 'ask_user' && askUserTypingCustom) {
+        const prev = askUserUndoManagerRef.current.undo(askUserCustomStateRef.current);
+        if (prev) applyAskUserCustomState(prev);
+      } else if (activeDialog === 'none') {
+        const prev = inputUndoManagerRef.current.undo(inputStateRef.current);
+        if (prev) applyInputState(prev);
       }
       return;
     }
-
-    if (daaSplashSeconds > 0) {
-      return;
-    }
-
-    // Confirmación TUI cuando el usuario borra por completo un prompt de la fila de espera: "¿Borrar posición #N?"
-    if (confirmDeleteQueueIdx !== null) {
-      const lower = input.toLowerCase();
-      if (key.return || lower === 's' || lower === 'y') {
-        queueRef.current.splice(confirmDeleteQueueIdx, 1);
-        syncQueueState();
-        setConfirmDeleteQueueIdx(null);
-        setEditingQueueIdx(null);
-        setInputText(draftInputRef.current);
-        draftInputRef.current = '';
-        return;
-      }
-      if (key.escape || lower === 'n') {
-        const restored = originalEditingQueueTextRef.current;
-        setConfirmDeleteQueueIdx(null);
-        setInputText(restored);
-        return;
+    if (isRedo) {
+      if (activeDialog === 'ask_user' && askUserTypingCustom) {
+        const next = askUserUndoManagerRef.current.redo(askUserCustomStateRef.current);
+        if (next) applyAskUserCustomState(next);
+      } else if (activeDialog === 'none') {
+        const next = inputUndoManagerRef.current.redo(inputStateRef.current);
+        if (next) applyInputState(next);
       }
       return;
     }
-
-    // ESC durante respuesta en streaming: cancela la petición actual
+    if ((key.ctrl && lowerInput === 'v') || input === '\x16') { handleClipboardPaste(); return; }
+    if (daaSplashSeconds > 0) return;
+    if (activeDialog === 'none' && (key.pageUp || key.pageDown)) {
+      const vpH = chatViewportRef.current?.yogaNode?.getComputedLayout().height ?? Math.max(4, rows - 10);
+      scrollChatBy(key.pageUp ? -Math.max(1, vpH - 2) : Math.max(1, vpH - 2));
+      return;
+    }
     if (
-      key.escape &&
-      isStreaming &&
-      activeDialog === 'none' &&
-      editingQueueIdx === null
-    ) {
-      abortControllerRef.current?.abort();
-      return;
-    }
-
-    // Atajo global en vivo: Shift+Tab o Alt+P alterna Sub-Modo Plan <-> Agente/Agent
-    if ((key.tab && key.shift) || (key.meta && input.toLowerCase() === 'p')) {
-      const nextSubMode: SubMode = toggleSubMode(
-        sessionRef.current.settings.subMode,
-      );
-      const updated: GlitchSettings = {
-        ...sessionRef.current.settings,
-        subMode: nextSubMode,
-      };
-      syncSettings(updated);
-      return;
-    }
-
-    // Tecla ← (flecha izquierda) o '<' en el chat normal con barra vacía: abre Agentes y Chats en tiempo real + Historial
-    if (
-      activeDialog === 'none' &&
-      editingQueueIdx === null &&
-      inputText.length === 0 &&
-      (key.leftArrow || input === '<')
-    ) {
-      openAgentsAndChatsDrawer();
-      return;
-    }
-
-    // Atajo '?' instantáneo cuando la barra de entrada está vacía y no hay diálogo abierto
-    if (
-      activeDialog === 'none' &&
-      inputText.length === 0 &&
-      input === '?' &&
-      !key.ctrl &&
-      !key.meta
-    ) {
-      setShowShortcutsPanel((prev) => !prev);
-      return;
-    }
-
-    // Manejo del panel de Agentes y Chats en tiempo real + Historial (abierto con ←)
-    if (activeDialog === 'agents_chats') {
-      const totalEntries = 1 + savedSessionsList.length; // 0 = Agente/Chat actual en vivo, 1..N = historial guardado
-      if (key.escape || key.rightArrow) {
-        setActiveDialog('none');
-        return;
-      }
-      if (key.upArrow && totalEntries > 0) {
-        setDialogCursor((prev) => (prev > 0 ? prev - 1 : totalEntries - 1));
-        return;
-      }
-      if (key.downArrow && totalEntries > 0) {
-        setDialogCursor((prev) => (prev < totalEntries - 1 ? prev + 1 : 0));
-        return;
-      }
-      if (key.return) {
-        if (dialogCursor === 0) {
-          // Seguir en el agente/chat actual
-          setActiveDialog('none');
-          return;
-        }
-        const picked = savedSessionsList[dialogCursor - 1];
-        if (picked) {
-          sessionRef.current.history.length = 0;
-          sessionRef.current.history.push(...picked.history);
-          setSessionId(picked.id);
-          sessionCreatedAtRef.current = picked.createdAt;
-          setMessages([
-            ...picked.messages,
-            {
-              id: `${Date.now()}-resumed`,
-              role: 'system',
-              text:
-                lang === 'en'
-                  ? `✓ Switched to chat: "${picked.title}" (${picked.history.length} turns).`
-                  : `✓ Cambiado al chat: "${picked.title}" (${picked.history.length} turnos).`,
-            },
-          ]);
-        }
-        setActiveDialog('none');
-        return;
-      }
-      return;
-    }
-
-    // Manejo del diálogo /resume
-    if (activeDialog === 'resume') {
-      if (key.escape) {
-        setActiveDialog('none');
-        return;
-      }
-      if (key.upArrow && savedSessionsList.length > 0) {
-        setDialogCursor((prev) =>
-          prev > 0 ? prev - 1 : savedSessionsList.length - 1,
-        );
-        return;
-      }
-      if (key.downArrow && savedSessionsList.length > 0) {
-        setDialogCursor((prev) =>
-          prev < savedSessionsList.length - 1 ? prev + 1 : 0,
-        );
-        return;
-      }
-      if (key.return) {
-        const picked = savedSessionsList[dialogCursor];
-        if (picked) {
-          sessionRef.current.history.length = 0;
-          sessionRef.current.history.push(...picked.history);
-          setSessionId(picked.id);
-          sessionCreatedAtRef.current = picked.createdAt;
-          setMessages([
-            ...picked.messages,
-            {
-              id: `${Date.now()}-resumed`,
-              role: 'system',
-              text: `✓ Conversación retomada: "${picked.title}" (${picked.history.length} turnos).`,
-            },
-          ]);
-        }
-        setActiveDialog('none');
-        return;
-      }
-      return;
-    }
-
-    // Manejo del diálogo /auth
-    if (activeDialog === 'auth') {
-      if (key.escape && isAuthConfigured(settings)) {
-        setActiveDialog('none');
-        return;
-      }
-
-      if (authStep === 'provider') {
-        if (key.upArrow || key.downArrow) {
-          setAuthChoiceIdx((prev) => (prev === 0 ? 1 : 0));
-          return;
-        }
-        if (key.return) {
-          if (authChoiceIdx === 0) {
-            setAuthBuffer(
-              settings.vertex?.project ||
-                process.env['GOOGLE_CLOUD_PROJECT'] ||
-                '',
-            );
-            setAuthStep('vertex_project');
-          } else {
-            setAuthBuffer(
-              settings.custom?.baseUrl || 'https://api.openai.com',
-            );
-            setAuthStep('custom_url');
-          }
-          return;
-        }
-        return;
-      }
-
-      if (authStep === 'custom_format') {
-        if (key.upArrow || key.downArrow) {
-          setAuthChoiceIdx((prev) => (prev === 0 ? 1 : 0));
-          return;
-        }
-        if (key.return) {
-          const format: CustomEndpointFormat =
-            authChoiceIdx === 1 ? 'responses' : 'chat_completions';
-          const updated: GlitchSettings = {
-            ...settings,
-            provider: 'custom',
-            custom: {
-              baseUrl: tempUrl,
-              apiKey: tempKey,
-              format,
-            },
-          };
-          syncSettings(updated);
-          setActiveDialog('none');
-          addSystemMessage(
-            `✓ API personalizada conectada (${tempUrl}, formato: ${format}, key: ${maskApiKey(tempKey)}).`,
-          );
-          return;
-        }
-        return;
-      }
-
-      if (key.return) {
-        const val = authBuffer.trim();
-        if (authStep === 'vertex_project') {
-          if (!val) return;
-          setTempProject(val);
-          setAuthBuffer(
-            settings.vertex?.location ||
-              process.env['GOOGLE_CLOUD_LOCATION'] ||
-              'us-central1',
-          );
-          setAuthStep('vertex_location');
-          return;
-        }
-        if (authStep === 'vertex_location') {
-          const loc = val || 'us-central1';
-          const updated: GlitchSettings = {
-            ...settings,
-            provider: 'vertex',
-            vertex: { project: tempProject, location: loc },
-          };
-          process.env['GOOGLE_CLOUD_PROJECT'] = tempProject;
-          process.env['GOOGLE_CLOUD_LOCATION'] = loc;
-          syncSettings(updated);
-          setActiveDialog('none');
-          addSystemMessage(
-            `✓ Conectado a Vertex AI (proyecto: ${tempProject}, región: ${loc}) usando ADC.`,
-          );
-          void refreshModels(updated);
-          return;
-        }
-        if (authStep === 'custom_url') {
-          if (!val) return;
-          setTempUrl(val);
-          setAuthBuffer('');
-          setAuthStep('custom_key');
-          return;
-        }
-        if (authStep === 'custom_key') {
-          const finalKey = val || settings.custom?.apiKey || '';
-          if (!finalKey) return;
-          setTempKey(finalKey);
-          setAuthChoiceIdx(0);
-          setAuthStep('custom_format');
-          return;
-        }
-        return;
-      }
-
-      if (key.backspace || key.delete) {
-        setAuthBuffer((prev) => prev.slice(0, -1));
-        return;
-      }
-      if (input && !key.ctrl && !key.meta) {
-        setAuthBuffer((prev) => prev + input);
-      }
-      return;
-    }
-
-    // Manejo del diálogo /model (con paginación ← / → y selección de esfuerzo integrada)
-    if (activeDialog === 'model') {
-      if (pendingModelForEffort) {
-        const efforts = pendingModelForEffort.supportedEfforts;
-        if (key.escape) {
-          setPendingModelForEffort(null);
-          return;
-        }
-        if (key.leftArrow || key.upArrow) {
-          setModelEffortIdx((prev) =>
-            prev > 0 ? prev - 1 : efforts.length - 1,
-          );
-          return;
-        }
-        if (key.rightArrow || key.downArrow) {
-          setModelEffortIdx((prev) =>
-            prev < efforts.length - 1 ? prev + 1 : 0,
-          );
-          return;
-        }
-        if (key.return) {
-          const chosenEffort =
-            efforts[modelEffortIdx] ??
-            pendingModelForEffort.defaultEffort ??
-            efforts[0]!;
-          const updated: GlitchSettings = {
-            ...settings,
-            model: pendingModelForEffort.id,
-            effort: chosenEffort,
-          };
-          syncSettings(updated);
-          addSystemMessage(
-            `✓ Modelo seleccionado: ${pendingModelForEffort.name} | ${pendingModelForEffort.id} (Esfuerzo: ${chosenEffort.toUpperCase()})`,
-          );
-          setPendingModelForEffort(null);
-          setActiveDialog('none');
-          return;
-        }
-        return;
-      }
-
-      const currentPage = modelPages[modelPageIdx] ?? modelPages[0];
-      const pageModels = currentPage?.models ?? [];
-
-      if (key.escape) {
-        setActiveDialog('none');
-        return;
-      }
-      if (key.leftArrow && modelPages.length > 0) {
-        setModelPageIdx((prev) =>
-          prev > 0 ? prev - 1 : modelPages.length - 1,
-        );
-        setDialogCursor(0);
-        return;
-      }
-      if (key.rightArrow && modelPages.length > 0) {
-        setModelPageIdx((prev) =>
-          prev < modelPages.length - 1 ? prev + 1 : 0,
-        );
-        setDialogCursor(0);
-        return;
-      }
-      if (key.upArrow && pageModels.length > 0) {
-        setDialogCursor((prev) =>
-          prev > 0 ? prev - 1 : pageModels.length - 1,
-        );
-        return;
-      }
-      if (key.downArrow && pageModels.length > 0) {
-        setDialogCursor((prev) =>
-          prev < pageModels.length - 1 ? prev + 1 : 0,
-        );
-        return;
-      }
-      if (key.return) {
-        if (sessionRef.current.isRequestActive) {
-          addSystemMessage(
-            '⚠ No puedes cambiar de modelo mientras hay una petición activa.',
-          );
-          setActiveDialog('none');
-          return;
-        }
-        const picked = pageModels[dialogCursor];
-        if (picked) {
-          if (picked.supportedEfforts.length > 1) {
-            const defaultEffort =
-              picked.supportedEfforts.includes(settings.effort)
-                ? settings.effort
-                : (picked.defaultEffort ?? picked.supportedEfforts[0]!);
-            const effIdx = Math.max(
-              0,
-              picked.supportedEfforts.indexOf(defaultEffort),
-            );
-            setModelEffortIdx(effIdx);
-            setPendingModelForEffort(picked);
-            return;
-          }
-
-          const nextEffort =
-            picked.supportedEfforts.length === 1
-              ? picked.supportedEfforts[0]!
-              : settings.effort;
-          const updated: GlitchSettings = {
-            ...settings,
-            model: picked.id,
-            effort: nextEffort,
-          };
-          syncSettings(updated);
-          addSystemMessage(
-            `✓ Modelo seleccionado: ${picked.name} | ${picked.id} (${picked.supportedEfforts.length > 0 ? `Esfuerzo: ${updated.effort.toUpperCase()}` : 'Esfuerzo: N/A'})`,
-          );
-        }
-        setActiveDialog('none');
-        return;
-      }
-      return;
-    }
-
-    // Manejo del diálogo /settings (/ajustes) — 6 opciones incluyendo Idioma
-    if (activeDialog === 'settings') {
-      if (key.escape) {
-        setActiveDialog('none');
-        return;
-      }
-      if (key.upArrow) {
-        setDialogCursor((prev) => (prev > 0 ? prev - 1 : 5));
-        return;
-      }
-      if (key.downArrow) {
-        setDialogCursor((prev) => (prev < 5 ? prev + 1 : 0));
-        return;
-      }
-      if (key.return || key.leftArrow || key.rightArrow) {
-        const cur = sessionRef.current.settings;
-        if (dialogCursor === 0) {
-          const order: PermissionMode[] = [
-            'always_allow',
-            'ask_insecure',
-            'always_ask',
-          ];
-          const nextMode =
-            order[(order.indexOf(cur.permissionMode) + 1) % order.length]!;
-          syncSettings({ ...cur, permissionMode: nextMode });
-        } else if (dialogCursor === 1) {
-          syncSettings({ ...cur, subMode: toggleSubMode(cur.subMode) });
-        } else if (dialogCursor === 2) {
-          const order: EffortLevel[] = ['low', 'medium', 'high'];
-          const nextEffort =
-            order[(order.indexOf(cur.effort) + 1) % order.length]!;
-          syncSettings({ ...cur, effort: nextEffort });
-        } else if (dialogCursor === 3) {
-          syncSettings({ ...cur, thoughts: !cur.thoughts });
-        } else if (dialogCursor === 4) {
-          syncSettings({ ...cur, hideDaaWarning: !cur.hideDaaWarning });
-        } else if (dialogCursor === 5) {
-          const nextLang: AppLanguage =
-            (cur.language ?? 'es') === 'es' ? 'en' : 'es';
-          syncSettings({ ...cur, language: nextLang });
-        }
-        return;
-      }
-      return;
-    }
-
-    // Autocompletado de Slash Commands (muestra comandos en el idioma activo)
-    if (matchingSlash.length > 0) {
-      if (key.upArrow) {
-        setSuggestionIdx((prev) =>
-          prev > 0 ? prev - 1 : matchingSlash.length - 1,
-        );
-        return;
-      }
-      if (key.downArrow) {
-        setSuggestionIdx((prev) =>
-          prev < matchingSlash.length - 1 ? prev + 1 : 0,
-        );
-        return;
-      }
-      if (key.tab) {
-        const chosen = matchingSlash[suggestionIdx] ?? matchingSlash[0];
-        if (chosen) {
-          setInputText(chosen.displayCmd[lang] + ' ');
-          setSuggestionIdx(0);
-        }
-        return;
-      }
-    }
-
-    // Navegación con ↑ / ↓ sobre la fila de prompts en cola (Queue)
-    if (matchingSlash.length === 0 && queueRef.current.length > 0) {
-      if (key.upArrow) {
-        const q = queueRef.current;
-        if (editingQueueIdx === null) {
-          draftInputRef.current = inputText;
-          const targetIdx = q.length - 1;
-          originalEditingQueueTextRef.current = q[targetIdx] ?? '';
-          setEditingQueueIdx(targetIdx);
-          setInputText(q[targetIdx] ?? '');
-        } else if (editingQueueIdx > 0) {
-          const targetIdx = editingQueueIdx - 1;
-          originalEditingQueueTextRef.current = q[targetIdx] ?? '';
-          setEditingQueueIdx(targetIdx);
-          setInputText(q[targetIdx] ?? '');
-        }
-        return;
-      }
-      if (key.downArrow && editingQueueIdx !== null) {
-        const q = queueRef.current;
-        if (editingQueueIdx < q.length - 1) {
-          const targetIdx = editingQueueIdx + 1;
-          originalEditingQueueTextRef.current = q[targetIdx] ?? '';
-          setEditingQueueIdx(targetIdx);
-          setInputText(q[targetIdx] ?? '');
-        } else {
-          setEditingQueueIdx(null);
-          setInputText(draftInputRef.current);
-        }
-        return;
-      }
-      if (key.escape && editingQueueIdx !== null) {
-        setEditingQueueIdx(null);
-        setInputText(draftInputRef.current);
-        return;
-      }
-    }
-
-    if (key.return) {
-      if (
-        editingQueueIdx !== null &&
-        editingQueueIdx >= 0 &&
-        editingQueueIdx < queueRef.current.length &&
-        !inputText.trim().startsWith('/')
-      ) {
-        const replacement = inputText.trim();
-        if (!replacement) {
-          setConfirmDeleteQueueIdx(editingQueueIdx);
-          return;
-        }
-        queueRef.current[editingQueueIdx] = replacement;
-        syncQueueState();
-        setEditingQueueIdx(null);
-        setInputText(draftInputRef.current);
-        draftInputRef.current = '';
-        return;
-      }
-
-      if (
-        matchingSlash.length > 0 &&
-        !inputText.trim().includes(' ') &&
-        inputText.trim() !== matchingSlash[suggestionIdx]?.displayCmd[lang] &&
-        !SLASH_COMMANDS.some(
-          (s) =>
-            s.cmd === inputText.trim() ||
-            s.displayCmd[lang] === inputText.trim(),
-        )
-      ) {
-        const chosen = matchingSlash[suggestionIdx];
-        if (chosen) {
-          setInputText('');
-          setSuggestionIdx(0);
-          executeInputCommand(chosen.cmd);
-          return;
-        }
-      }
-      const toRun = inputText;
-      setInputText('');
-      setEditingQueueIdx(null);
-      setSuggestionIdx(0);
-      executeInputCommand(toRun);
-      return;
-    }
-
-    if (key.backspace || key.delete) {
-      if (showShortcutsPanel) {
-        setShowShortcutsPanel(false);
-      }
-      if (editingQueueIdx !== null && inputText.length <= 1) {
-        setInputText('');
-        setConfirmDeleteQueueIdx(editingQueueIdx);
-        return;
-      }
-      setInputText((prev) => prev.slice(0, -1));
-      setSuggestionIdx(0);
-      return;
-    }
-
-    if (input && !key.ctrl && !key.meta) {
-      if (showShortcutsPanel) {
-        setShowShortcutsPanel(false);
-      }
-      setInputText((prev) => prev + input);
-      setSuggestionIdx(0);
-    }
+      handleActiveDialogInput(input, key, {
+        activeDialog, session: sessionRef.current, sessionId, settings, dialogCursor, savedSessionsList, liveSubagents, activeChats: activeChatsList,
+        selectedSubagentId, correctionInputText, pendingRelaunchConfirm, showAllHistorySessions, showAllAgentsHistory,
+        setSelectedSubagentId, setCorrectionInputText, setPendingRelaunchConfirm, setShowAllHistorySessions, setShowAllAgentsHistory,
+        onSwitchActiveChat: switchActiveChat, onCreateNewActiveChat: () => resetNewSessionUi(createSessionId()),
+        setAgentsPanelNotice, onSubmitSubagentCorrection: submitSubagentCorrection, authStep, authChoiceIdx, authBuffer,
+        tempProject, tempUrl, tempKey, modelPages, modelPageIdx, pendingModelForEffort, modelEffortIdx, editingThresholdMode,
+        thresholdBuffer, pendingAskUser, askUserCursor, askUserCustomText, askUserCustomCursor, askUserTypingCustom,
+        askUserUndoManager: askUserUndoManagerRef.current, mcpServers, installedSkills, activeSkillContents: activeSkillContentsRef.current,
+        setActiveDialog, setDialogCursor, resumeSavedSessionUi, setAuthChoiceIdx, setAuthBuffer, setAuthStep, setTempProject,
+        setTempUrl, setTempKey, syncSettings, addSystemMessage, refreshModels, setPendingModelForEffort, setModelEffortIdx,
+        setModelPageIdx, setEditingThresholdMode, setThresholdBuffer, setThresholdError, setAskUserTypingCustom, setPendingAskUser,
+        setAskUserCursor, applyAskUserCustomState, syncActiveSkillsFromSet,
+      })
+    ) return;
+    handleMainEditorKeyInput(input, key, {
+      inputText, inputCursor, isStreaming, editingQueueIdx, confirmDeleteQueueIdx, matchingSlash, suggestionIdx,
+      showShortcutsPanel, session: sessionRef.current, queueRef, draftInputRef, originalEditingQueueTextRef, inputStateRef,
+      inputUndoManager: inputUndoManagerRef.current, abortCurrentTurn: cancelCurrentTurnAndQueue,
+      syncQueueState, setConfirmDeleteQueueIdx, setEditingQueueIdx, setFullInputText, applyInputState, syncSettings, setThoughtsCollapsed,
+      selectionMode, setSelectionMode, openAgentsPanel: (saved) => openAgentsPanelNow(saved),
+      setShowShortcutsPanel, setSuggestionIdx, executeInputCommand, handlePastedTextBlock,
+    });
   });
-
-  if (daaSplashSeconds > 0) {
-    return (
-      <Box
-        flexDirection="column"
-        borderStyle="double"
-        borderColor="red"
-        paddingX={3}
-        paddingY={1}
-        margin={1}
-      >
-        <Text bold color="red">
-          ⚠ ADVERTENCIA DE SEGURIDAD: FLAG --DAA (--dangerously-always-allow) DETECTADA
-        </Text>
-        <Box marginTop={1} flexDirection="column">
-          <Text color="yellow">
-            • Has iniciado Glitch CLI con --DAA: modo Always Allow y SIN SANDBOX.
-          </Text>
-          <Text color="yellow">
-            • Tiene acceso completo a todo tu PC sin importar desde qué carpeta lo abras (Downloads, System32, etc.).
-          </Text>
-          <Text color="yellow">
-            • Ninguna acción o modificación pedirá confirmación manual mientras este modo esté activo.
-          </Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text color="white" bold>
-            Iniciando Glitch CLI en {daaSplashSeconds} segundos...
-          </Text>
-        </Box>
-        <Text color="gray">
-          (Puedes desactivar esta advertencia inicial en /ajustes → Advertencia --DAA al inicio: OFF)
-        </Text>
-      </Box>
-    );
-  }
-
-  const artWidth = GLITCH_ASCII_LINES[0]?.length ?? 80;
-  const artPad = ' '.repeat(Math.max(0, Math.floor((columns - artWidth) / 2)));
-
-  let userTurnCounter = 0;
-  let modelTurnCounter = 0;
-  const numberedMessages = messages.map((m) => {
-    if (m.role === 'user') {
-      userTurnCounter++;
-      return { ...m, turnNumber: userTurnCounter };
+  const activeChatsList: ActiveTerminalChatEntry[] = useMemo(() => {
+    const entries: ActiveTerminalChatEntry[] = [];
+    for (const [id, entry] of activeChatsMapRef.current.entries()) {
+      if (id === sessionId) continue;
+      entries.push({
+        id, title: deriveSessionTitle(entry.messages, entry.session.history, entry.session.customTitle),
+        turnCount: countRealUserTurns({ history: entry.session.history, messages: entry.messages }),
+        isStreaming: entry.session.isRequestActive, isCurrent: false, model: entry.session.settings.model,
+      });
     }
-    if (m.role === 'model') {
-      modelTurnCounter++;
-      return { ...m, turnNumber: modelTurnCounter };
-    }
-    return { ...m, turnNumber: 0 };
+    entries.unshift({
+      id: sessionId, title: deriveSessionTitle(messages, sessionRef.current.history, sessionRef.current.customTitle),
+      turnCount: countRealUserTurns({ history: sessionRef.current.history, messages }),
+      isStreaming, isCurrent: true, model: settings.model,
+    });
+    return entries;
+  }, [sessionId, messages, isStreaming, settings.model]);
+  if (daaSplashSeconds > 0) return <DaaSplashView seconds={daaSplashSeconds} />;
+  const { numberedMessages, userTurnCounter, modelTurnCounter } = useMemo(() => {
+    let uCount = 0; let mCount = 0;
+    const list: NumberedUiMessage[] = messages.map((m) => {
+      if (m.role === 'user') return { ...m, turnNumber: ++uCount };
+      if (m.role === 'model' && m.text.trim().length > 0) return { ...m, turnNumber: ++mCount };
+      return { ...m, turnNumber: 0 };
+    });
+    return { numberedMessages: list, userTurnCounter: uCount, modelTurnCounter: mCount };
+  }, [messages]);
+  const activeSkillContentsList = useMemo(() => Array.from(activeSkillContentsRef.current.values()), [activeSkillNames]);
+  const historyTurnLen = sessionRef.current.history.length;
+  const activeModelContextWindow = getModelContextWindow(settings.model, settings.provider ?? 'vertex', settings.custom);
+  const contextBreakdown = useMemo(
+    () => computeContextUsageBreakdown(sessionRef.current.history, settings.subMode, installedSkills, activeSkillContentsList, activeModelContextWindow, mcpServers, lastApiPromptTokens),
+    [historyTurnLen, messages.length, settings.subMode, installedSkills, activeSkillContentsList, activeModelContextWindow, mcpServers, lastApiPromptTokens],
+  );
+  const chatCostSummary = useMemo(
+    () => computeChatCostSummary(costRecords, settings.model, settings.modelPricing, liveInFlightUsage, liveInFlightModelId, { regionalSurchargePct: settings.regionalSurchargePct }),
+    [costRecords, settings.model, settings.modelPricing, liveInFlightUsage, liveInFlightModelId, settings.regionalSurchargePct],
+  );
+  const runningSubagents = liveSubagents.filter((s) => s.status === 'running');
+  const activeAgentCount = 1 + runningSubagents.length;
+  const showHeader = shouldShowHeaderForRows(rows);
+  const uniformBoxWidth = Math.max(20, columns - 4);
+  const uniformBoxInnerWidth = Math.max(10, uniformBoxWidth - 4);
+  const maxInputBoxLines = Math.max(1, Math.min(10, Math.floor(rows * 0.35)));
+  const visibleInputBoxLines = Math.min(Math.max(1, inputText.split('\n').length), maxInputBoxLines);
+  const queueLinesEstimate = queuedPrompts.length > 0 && activeDialog === 'none' ? queuedPrompts.length * 2 + 3 : 0;
+  const bottomZoneEstimate = 2 + visibleInputBoxLines + 2 + queueLinesEstimate + (isStreaming ? 1 : 0);
+  const estimatedViewportHeight = Math.max(1, rows - (showHeader ? 5 : 0) - bottomZoneEstimate);
+  const estimatedContentHeight = useMemo(() => numberedMessages.reduce((acc, m) => acc + Math.max(1, m.text.split('\n').length) + 1, 0), [numberedMessages]);
+  const computedVpH = chatViewportRef.current?.yogaNode?.getComputedLayout().height ?? 0;
+  const computedContH = chatContentRef.current?.yogaNode?.getComputedLayout().height ?? 0;
+  const effectiveViewportHeight = computedVpH > 0 ? computedVpH : estimatedViewportHeight;
+  const effectiveContentHeight = computedContH > 0 ? computedContH : estimatedContentHeight;
+  const maxScrollTop = Math.max(0, effectiveContentHeight - effectiveViewportHeight);
+  maxScrollTopRef.current = maxScrollTop;
+  const effectiveScrollTop = computeEffectiveScrollTop(scrollState, maxScrollTop);
+  const scrollbarMetrics = computeScrollbarThumb({
+    trackHeight: Math.max(1, effectiveViewportHeight), contentHeight: effectiveContentHeight,
+    viewportHeight: effectiveViewportHeight, scrollTop: effectiveScrollTop,
   });
-  const nextStreamingReplyNumber = modelTurnCounter + 1;
-
-  const modeColor =
-    settings.permissionMode === 'always_allow'
-      ? 'redBright'
-      : settings.permissionMode === 'ask_insecure'
-        ? 'yellow'
-        : 'cyan';
-
-  const msgPrefixLabel = lang === 'en' ? 'Message' : 'Mensaje';
-  const replyPrefixLabel = lang === 'en' ? 'Reply' : 'Respuesta';
-  const headerInfo = formatClaudeStyleHeaderInfo(settings, version);
-  const activeAgentCount = 1;
-
-  type StaticEntry =
-    | { kind: 'banner'; id: string }
-    | {
-        kind: 'msg';
-        id: string;
-        msg: SavedUiMessage & { turnNumber: number };
-      };
-
-  const staticEntries: StaticEntry[] = [
-    { kind: 'banner', id: `banner-${staticEpoch}` },
-    ...numberedMessages.map((m) => ({
-      kind: 'msg' as const,
-      id: `${staticEpoch}-${m.id}`,
-      msg: m,
-    })),
-  ];
-
+  const showScrollBottomBtn = shouldShowScrollToBottomButton(scrollState, maxScrollTop);
+  const newMsgsCount = scrollState.isAtBottom ? 0 : Math.max(0, messages.length - seenMsgCountAtBottom);
   return (
-    <Box flexDirection="column" paddingX={1}>
-      {/* ZONA ESTÁTICA (<Static>): Se imprime UNA SOLA VEZ en el buffer de la terminal.
-          Jamás se vuelve a redibujar al moverte o escribir, eliminando el duplicado al subir con el mouse. */}
-      <Static items={staticEntries}>
-        {(entry) => {
-          if (entry.kind === 'banner') {
-            return (
-              <Box key={entry.id} flexDirection="column" marginBottom={1}>
-                <Box flexDirection="row" alignItems="center">
-                  <Box flexDirection="column" marginRight={2}>
-                    {GLITCH_MINI_LOGO_LINES.map((logoLine, idx) => (
-                      <Text key={idx} color="cyan" bold>
-                        {logoLine}
-                      </Text>
-                    ))}
-                  </Box>
-                  <Box flexDirection="column">
-                    <Box>
-                      <Text bold color="white">
-                        {headerInfo.line1Title}{' '}
-                      </Text>
-                      <Text color="gray">{headerInfo.line1Version}</Text>
-                    </Box>
-                    <Text color="gray">{headerInfo.line2ModelAuth}</Text>
-                    <Text color="gray">{headerInfo.line3Cwd}</Text>
-                  </Box>
-                </Box>
-
-                <Box flexDirection="column" marginTop={1}>
-                  {GLITCH_ASCII_LINES.map((line, i) => (
-                    <Text key={i} color="gray">
-                      {artPad}
-                      {line}
-                    </Text>
-                  ))}
-                </Box>
-              </Box>
-            );
-          }
-
-          const m = entry.msg;
-          return (
-            <Box key={entry.id} flexDirection="column" marginBottom={1}>
-              {m.role === 'user' && (
-                <Box>
-                  <Text color="cyan" bold>
-                    {`${msgPrefixLabel} ${m.turnNumber}${m.timestamp ? ` (${m.timestamp})` : ''} > `}
-                  </Text>
-                  <Text color="white" bold>
-                    {m.text}
-                  </Text>
-                </Box>
-              )}
-              {m.role === 'model' && (
-                <Box flexDirection="column">
-                  {m.thoughtText && settings.thoughts && (
-                    <Box
-                      borderStyle="single"
-                      borderColor="gray"
-                      paddingX={1}
-                      marginBottom={1}
-                    >
-                      <Text color="gray" italic>
-                        💭 {m.thoughtText}
-                      </Text>
-                    </Box>
-                  )}
-                  <Box>
-                    <Text color="green" bold>
-                      {`${replyPrefixLabel} ${m.turnNumber}${m.durationText ? ` (${m.durationText})` : ''} > `}
-                    </Text>
-                    <Text color="white">{m.text}</Text>
-                  </Box>
-                </Box>
-              )}
-              {m.role === 'system' && (
-                <Box>
-                  <Text color="yellow">{m.text}</Text>
-                </Box>
-              )}
-            </Box>
-          );
-        }}
-      </Static>
-
-      {/* ZONA DINÁMICA INFERIOR (compacta): Streaming en curso + Diálogo activo (que reemplaza al chat) o Caja de Chat */}
-      <Box flexDirection="column">
-        {/* Texto parcial en streaming mientras el modelo está respondiendo */}
-        {isStreaming && (liveThought || liveText) && (
-          <Box flexDirection="column" marginBottom={1}>
-            {liveThought && settings.thoughts && (
-              <Box borderStyle="single" borderColor="gray" paddingX={1}>
-                <Text color="gray" italic>
-                  💭 {liveThought}
-                </Text>
-              </Box>
-            )}
-            {liveText && (
-              <Box>
-                <Text color="green" bold>
-                  {`${replyPrefixLabel} ${nextStreamingReplyNumber} (${formatElapsedDuration(streamingElapsedMs)}) > `}
-                </Text>
-                <Text color="white">{liveText}</Text>
-              </Box>
-            )}
-          </Box>
-        )}
-
-        {/* Cuando hay un diálogo activo (/settings, /model, /auth, /resume, ← chats), REEMPLAZA el área del chat abajo */}
-        {activeDialog === 'agents_chats' && (
-          <Box
-            flexDirection="column"
-            borderStyle="round"
-            borderColor="cyan"
-            paddingX={2}
-            paddingY={1}
-          >
-            <Box
-              flexDirection="row"
-              justifyContent="space-between"
-              marginBottom={1}
-            >
-              <Text bold color="cyan">
-                {lang === 'en'
-                  ? '◄ Live Agents, Active Chats & History'
-                  : '◄ Agentes y Chats en Tiempo Real + Historial'}
-              </Text>
-              <Text color="gray">
-                {lang === 'en'
-                  ? '↑/↓ select · Enter open · → or Esc back'
-                  : '↑/↓ elegir · Enter abrir · → o Esc volver'}
-              </Text>
-            </Box>
-
-            <Text bold color="green">
-              {lang === 'en'
-                ? 'Active Agent / Current Session (Real-Time):'
-                : 'Agente / Sesión Activa en Tiempo Real:'}
-            </Text>
-            <Text
-              color={dialogCursor === 0 ? 'cyan' : 'white'}
-              bold={dialogCursor === 0}
-            >
-              {dialogCursor === 0 ? '❯ ' : '  '}
-              {isStreaming
-                ? lang === 'en'
-                  ? '🟢 [RUNNING]'
-                  : '🟢 [PENSANDO EN VIVO]'
-                : lang === 'en'
-                  ? '🟢 [ACTIVE]'
-                  : '🟢 [ACTIVO]'}{' '}
-              {deriveSessionTitle(messages, sessionRef.current.history).padEnd(
-                36,
-                ' ',
-              )}{' '}
-              | {settings.model} ({settings.effort.toUpperCase()}) |{' '}
-              {formatSubModeLabel(settings.subMode, lang)} |{' '}
-              {sessionRef.current.history.length}{' '}
-              {lang === 'en' ? 'turns' : 'turnos'}
-            </Text>
-
-            <Box marginTop={1} flexDirection="column">
-              <Text bold color="yellow">
-                {lang === 'en'
-                  ? `Chat History (${savedSessionsList.length}):`
-                  : `Historial de Chats Guardados (${savedSessionsList.length}):`}
-              </Text>
-              {savedSessionsList.length === 0 ? (
-                <Text color="gray">
-                  {lang === 'en'
-                    ? '  (No saved conversations yet)'
-                    : '  (Aún no hay conversaciones anteriores guardadas)'}
-                </Text>
-              ) : (
-                savedSessionsList.map((s, idx) => {
-                  const rowIndex = idx + 1;
-                  const isSelected = dialogCursor === rowIndex;
-                  const isCurrentId = s.id === sessionId;
-                  return (
-                    <Text
-                      key={s.id}
-                      color={isSelected ? 'cyan' : 'white'}
-                      bold={isSelected}
-                    >
-                      {isSelected ? '❯ ' : '  '}
-                      {s.title.padEnd(42, ' ')} | {s.model.padEnd(24, ' ')} |{' '}
-                      {s.updatedAt} ({s.history.length}{' '}
-                      {lang === 'en' ? 'turns' : 'turnos'})
-                      {isCurrentId ? ' (actual)' : ''}
-                    </Text>
-                  );
-                })
-              )}
+    <Box flexDirection="column" width={columns} height={rows} paddingX={1} overflow="hidden">
+      {showHeader && <Box flexDirection="column" flexShrink={0}><HeaderBanner settings={settings} version={version} /></Box>}
+      {activeDialog === 'none' ? (
+        <Box flexDirection="row" flexGrow={1} flexShrink={1} overflow="hidden">
+          <Box ref={chatViewportRef} flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden" contentOffsetY={effectiveScrollTop}>
+            <Box ref={chatContentRef} flexDirection="column" flexShrink={0}>
+              <ChatHistoryView
+                numberedMessages={numberedMessages} uniformBoxWidth={uniformBoxWidth} uniformBoxInnerWidth={uniformBoxInnerWidth}
+                thoughtsEnabled={settings.thoughts} thinkingDisplay={settings.thinkingDisplay ?? 'expandido'}
+                thoughtsCollapsed={thoughtsCollapsed} perMessageCollapsed={perMessageCollapsed} copiedMessageId={copiedMessageId}
+                isStreaming={isStreaming} liveThought={liveThought} liveText={liveText}
+                nextStreamingReplyNumber={modelTurnCounter + 1} liveSubagents={liveSubagents}
+              />
             </Box>
           </Box>
-        )}
-
-        {activeDialog === 'resume' && (
-          <Box
-            flexDirection="column"
-            borderStyle="round"
-            borderColor="cyan"
-            paddingX={2}
-            paddingY={1}
-          >
-            <Text bold color="cyan">
-              Retomar Conversación (/resume) — ↑/↓ para elegir, Enter cargar, Esc salir
-            </Text>
-            {savedSessionsList.map((s, idx) => {
-              const isSelected = idx === dialogCursor;
-              return (
-                <Text key={s.id} color={isSelected ? 'cyan' : 'white'}>
-                  {isSelected ? '❯ ' : '  '}
-                  {s.title.padEnd(48, ' ')} | {s.model.padEnd(24, ' ')} |{' '}
-                  {s.updatedAt} ({s.history.length} turnos)
-                </Text>
-              );
-            })}
-          </Box>
-        )}
-
-        {activeDialog === 'auth' && (
-          <Box
-            flexDirection="column"
-            borderStyle="round"
-            borderColor="cyan"
-            paddingX={2}
-            paddingY={1}
-          >
-            <Text bold color="cyan">
-              Configuración de Autenticación (/auth)
-            </Text>
-            <Text color="gray">Actual: {formatAuthSummary(settings)}</Text>
-            {authStep === 'provider' && (
-              <Box flexDirection="column" marginTop={1}>
-                <Text>Selecciona proveedor (↑/↓ y Enter):</Text>
-                <Text color={authChoiceIdx === 0 ? 'cyan' : 'white'}>
-                  {authChoiceIdx === 0 ? '❯ ' : '  '}1. Vertex AI (Application Default Credentials - Free Trial)
-                </Text>
-                <Text color={authChoiceIdx === 1 ? 'cyan' : 'white'}>
-                  {authChoiceIdx === 1 ? '❯ ' : '  '}2. API personalizada (/v1/chat/completions o /v1/responses)
-                </Text>
-              </Box>
-            )}
-            {authStep === 'vertex_project' && (
-              <Box flexDirection="column" marginTop={1}>
-                <Text>Proyecto GCP (GOOGLE_CLOUD_PROJECT):</Text>
-                <Text color="cyan">
-                  {'› '}
-                  {authBuffer}█
-                </Text>
-              </Box>
-            )}
-            {authStep === 'vertex_location' && (
-              <Box flexDirection="column" marginTop={1}>
-                <Text>Región GCP (GOOGLE_CLOUD_LOCATION):</Text>
-                <Text color="cyan">
-                  {'› '}
-                  {authBuffer}█
-                </Text>
-              </Box>
-            )}
-            {authStep === 'custom_url' && (
-              <Box flexDirection="column" marginTop={1}>
-                <Text>Base URL del proveedor personalizado:</Text>
-                <Text color="cyan">
-                  {'› '}
-                  {authBuffer}█
-                </Text>
-              </Box>
-            )}
-            {authStep === 'custom_key' && (
-              <Box flexDirection="column" marginTop={1}>
-                <Text>API Key (se mostrará y guardará enmascarada):</Text>
-                <Text color="cyan">
-                  {'› '}
-                  {authBuffer ? '*'.repeat(Math.min(authBuffer.length, 24)) : ''}█
-                </Text>
-              </Box>
-            )}
-            {authStep === 'custom_format' && (
-              <Box flexDirection="column" marginTop={1}>
-                <Text>Selecciona el formato del endpoint (↑/↓ y Enter):</Text>
-                <Text color={authChoiceIdx === 0 ? 'cyan' : 'white'}>
-                  {authChoiceIdx === 0 ? '❯ ' : '  '}1. /v1/chat/completions
-                </Text>
-                <Text color={authChoiceIdx === 1 ? 'cyan' : 'white'}>
-                  {authChoiceIdx === 1 ? '❯ ' : '  '}2. /v1/responses
-                </Text>
-              </Box>
-            )}
-          </Box>
-        )}
-
-        {activeDialog === 'model' && (
-          <Box
-            flexDirection="column"
-            borderStyle="round"
-            borderColor="cyan"
-            paddingX={2}
-            paddingY={1}
-          >
-            <Box
-              flexDirection="row"
-              justifyContent="space-between"
-              marginBottom={1}
-            >
-              <Text bold color="cyan">
-                Selector de Modelos (/model)
-              </Text>
-              <Text color="gray">
-                ←/→ cambiar familia · ↑/↓ elegir · Enter confirmar · Esc salir
-              </Text>
+          {scrollbarMetrics.hasOverflow && (
+            <Box flexDirection="column" width={1} flexShrink={0}>
+              {Array.from({ length: scrollbarMetrics.trackHeight }, (_, idx) => {
+                const inThumb = idx >= scrollbarMetrics.thumbTop && idx < scrollbarMetrics.thumbTop + scrollbarMetrics.thumbHeight;
+                return <Text key={idx} color={inThumb ? 'cyan' : 'gray'} dimColor={!inThumb}>{inThumb ? '┃' : '│'}</Text>;
+              })}
             </Box>
-
-            {pendingModelForEffort ? (
-              <Box flexDirection="column" marginTop={1}>
-                <Text bold color="white">
-                  Selecciona el nivel de ESFUERZO para {pendingModelForEffort.name}{' '}
-                  (←/→ y Enter, Esc volver):
-                </Text>
-                <Box flexDirection="row" marginTop={1}>
-                  {pendingModelForEffort.supportedEfforts.map((ef, idx) => {
-                    const isChosen = idx === modelEffortIdx;
-                    return (
-                      <Box key={ef} marginRight={3}>
-                        <Text
-                          bold={isChosen}
-                          color={isChosen ? 'cyan' : 'white'}
-                        >
-                          {isChosen
-                            ? `❯ [${ef.toUpperCase()}]`
-                            : `  ${ef.toUpperCase()}`}
-                        </Text>
-                      </Box>
-                    );
-                  })}
-                </Box>
-              </Box>
-            ) : (
-              <>
-                <Box flexDirection="row" marginBottom={1}>
-                  <Text color="cyan" bold>
-                    {'◄ '}
-                  </Text>
-                  {modelPages.map((page, pIdx) => {
-                    const isCurrentPage = pIdx === modelPageIdx;
-                    return (
-                      <Box key={page.family} marginRight={2}>
-                        <Text
-                          bold={isCurrentPage}
-                          color={isCurrentPage ? 'cyan' : 'gray'}
-                        >
-                          {`[Pág ${pIdx + 1}/${modelPages.length}: ${page.title}]`}
-                        </Text>
-                      </Box>
-                    );
-                  })}
-                  <Text color="cyan" bold>
-                    {'►'}
-                  </Text>
-                </Box>
-
-                <Box flexDirection="column" marginBottom={1}>
-                  <Text bold color="white">
-                    {'  '}
-                    {'NOMBRE DEL MODELO'.padEnd(36, ' ')}
-                    {' | '}
-                    {'ID MODELO'.padEnd(32, ' ')}
-                    {' | '}
-                    {'FECHA'.padEnd(10, ' ')}
-                    {' | '}
-                    {'ESFUERZO'}
-                  </Text>
-                  <Text color="gray">{'  ' + '─'.repeat(104)}</Text>
-                </Box>
-
-                {(modelPages[modelPageIdx]?.models ?? []).map((m, idx) => {
-                  const isSelected = idx === dialogCursor;
-                  const isCurrent = m.id === settings.model;
-                  const cols = formatModelRowColumns(m, isCurrent, 36, 32, 10);
-                  return (
-                    <Box key={m.id} flexDirection="row">
-                      <Text
-                        color={isSelected ? 'cyan' : 'white'}
-                        bold={isSelected}
-                      >
-                        {isSelected ? '❯ ' : '  '}
-                        {cols.nameCol}
-                      </Text>
-                      <Text color="gray">{' | '}</Text>
-                      <Text color={isSelected ? 'cyan' : 'gray'}>
-                        {cols.idCol}
-                      </Text>
-                      <Text color="gray">{' | '}</Text>
-                      <Text color={isSelected ? 'cyan' : 'green'}>
-                        {cols.dateCol}
-                      </Text>
-                      <Text color="gray">{' | '}</Text>
-                      <Text color={isSelected ? 'cyan' : 'yellow'}>
-                        {cols.effortsCol}
-                      </Text>
-                    </Box>
-                  );
-                })}
-              </>
-            )}
-          </Box>
-        )}
-
-        {/* TUI de /ajustes (/settings) y su explicación en la ZONA INFERIOR, reemplazando la caja de chat */}
-        {activeDialog === 'settings' && (() => {
-          const detail = getSettingHelpDetail(dialogCursor, lang);
-          return (
-            <Box flexDirection="column">
-              <Box
-                flexDirection="column"
-                borderStyle="round"
-                borderColor="cyan"
-                paddingX={2}
-                paddingY={1}
-              >
-                <Text bold color="cyan">
-                  {lang === 'en'
-                    ? 'Preferences Panel (/settings) — ↑/↓ select, Enter/←/→ change, Esc close'
-                    : 'Panel de Preferencias (/ajustes) — ↑/↓ seleccionar, Enter/←/→ cambiar, Esc cerrar'}
-                </Text>
-                <Text color={dialogCursor === 0 ? 'cyan' : 'white'}>
-                  {dialogCursor === 0 ? '❯ ' : '  '}
-                  {lang === 'en'
-                    ? 'Permission Mode             : '
-                    : 'Modo de permisos            : '}
-                  {formatPermissionModeLabel(settings.permissionMode)}
-                </Text>
-                <Text color={dialogCursor === 1 ? 'cyan' : 'white'}>
-                  {dialogCursor === 1 ? '❯ ' : '  '}
-                  {lang === 'en'
-                    ? 'Sub-Mode                    : '
-                    : 'Sub-Modo                    : '}
-                  {formatSubModeLabel(settings.subMode, lang)}
-                </Text>
-                <Text color={dialogCursor === 2 ? 'cyan' : 'white'}>
-                  {dialogCursor === 2 ? '❯ ' : '  '}
-                  {lang === 'en'
-                    ? 'Default Effort              : '
-                    : 'Esfuerzo por defecto        : '}
-                  {settings.effort.toUpperCase()}
-                </Text>
-                <Text color={dialogCursor === 3 ? 'cyan' : 'white'}>
-                  {dialogCursor === 3 ? '❯ ' : '  '}Thoughts                    :{' '}
-                  {settings.thoughts ? 'ON' : 'OFF'}
-                </Text>
-                <Text color={dialogCursor === 4 ? 'cyan' : 'white'}>
-                  {dialogCursor === 4 ? '❯ ' : '  '}
-                  {lang === 'en'
-                    ? '--DAA Startup Warning       : '
-                    : 'Advertencia --DAA al inicio : '}
-                  {settings.hideDaaWarning ? 'OFF' : 'ON'}
-                </Text>
-                <Text color={dialogCursor === 5 ? 'cyan' : 'white'}>
-                  {dialogCursor === 5 ? '❯ ' : '  '}
-                  {lang === 'en'
-                    ? 'Language / Idioma           : '
-                    : 'Idioma / Language           : '}
-                  {lang === 'en' ? 'English' : 'Español'}
-                </Text>
-              </Box>
-
-              <Box
-                flexDirection="column"
-                borderStyle="round"
-                borderColor="yellow"
-                paddingX={2}
-                paddingY={0}
-              >
-                <Text bold color="yellow">
-                  ℹ {detail.title}
-                </Text>
-                <Box flexDirection="row">
-                  <Text bold color="cyan">
-                    {detail.availableModesLabel}{' '}
-                  </Text>
-                  <Text color="white">{detail.availableModes}</Text>
-                </Box>
-                <Box flexDirection="row">
-                  <Text bold color="green">
-                    {detail.whatItDoesLabel}{' '}
-                  </Text>
-                  <Text color="white">{detail.whatItDoes}</Text>
-                </Box>
-              </Box>
-            </Box>
-          );
-        })()}
-
-        {showShortcutsPanel && activeDialog === 'none' && (
-          <Box
-            flexDirection="column"
-            borderStyle="round"
-            borderColor="cyan"
-            paddingX={2}
-            paddingY={1}
-            marginBottom={1}
-          >
-            <Text bold color="cyan">
-              {lang === 'en'
-                ? 'Quick Shortcuts & Commands (press ? again to hide)'
-                : 'Atajos y Comandos Rápidos (presiona ? de nuevo para ocultar)'}
-            </Text>
-            {SLASH_COMMANDS.map((sc) => (
-              <Text key={sc.cmd} color="white">
-                {`  ${sc.displayCmd[lang].padEnd(24, ' ')} ${sc.desc[lang]}`}
-              </Text>
-            ))}
-            <Text color="white">
-              {lang === 'en'
-                ? '  ← (Left Arrow)            Open Live Agents, Active Chats & History'
-                : '  ← (Flecha izquierda)      Abrir Agentes y Chats en tiempo real + Historial'}
-            </Text>
-            <Text color="white">
-              {lang === 'en'
-                ? '  Shift+Tab / Alt+P         Toggle Sub-Mode Plan <-> Agent live'
-                : '  Shift+Tab / Alt+P         Alternar Sub-Modo Plan <-> Agente en vivo'}
-            </Text>
-            <Text color="white">
-              {lang === 'en'
-                ? '  Ctrl+C (x2)               Press twice to confirm and exit Glitch CLI'
-                : '  Ctrl+C (x2)               Presionar dos veces para confirmar y salir'}
-            </Text>
-            <Text color="gray">
-              {'  Flags CLI: glitch --DAA | glitch --dangerously-always-allow | glitch --model <id> | glitch -m "<id>"'}
-            </Text>
-          </Box>
-        )}
-
-        {/* TUI de confirmación al borrar completamente un elemento de la fila de espera */}
-        {confirmDeleteQueueIdx !== null && (
-          <Box
-            borderStyle="round"
-            borderColor="red"
-            paddingX={2}
-            marginBottom={0}
-          >
-            <Text color="red" bold>
-              {lang === 'en'
-                ? `⚠ Delete queued prompt at position #${confirmDeleteQueueIdx + 1}? [Enter / Y = Yes, delete · Esc / N = Cancel]`
-                : `⚠ ¿Borrar posición #${confirmDeleteQueueIdx + 1} de la fila de espera? [Enter / S = Sí, borrar · Esc / N = Cancelar]`}
-            </Text>
-          </Box>
-        )}
-
-        {/* Aviso de doble Ctrl+C para salir */}
-        {ctrlCPending && (
-          <Box paddingX={1} marginBottom={0}>
-            <Text color="yellow" bold>
-              {lang === 'en'
-                ? '⚠ Press again to exit'
-                : '⚠ Presiona otra vez para salir'}
-            </Text>
-          </Box>
-        )}
-
-        {queuedPrompts.length > 0 && activeDialog === 'none' && (
-          <Box
-            flexDirection="column"
-            borderStyle="single"
-            borderColor="yellow"
-            paddingX={1}
-          >
-            <Text color="yellow" bold>
-              {lang === 'en'
-                ? `⏳ Queued (${queuedPrompts.length}) — use ↑/↓ to select, Enter to edit in place, or clear text to delete:`
-                : `⏳ En fila de espera (${queuedPrompts.length}) — usa ↑/↓ para elegir, Enter para editar en su posición o borra el texto para eliminar:`}
-            </Text>
-            {queuedPrompts.map((qp, idx) => {
-              const isEditingThis = editingQueueIdx === idx;
-              return (
-                <Text
-                  key={idx}
-                  color={isEditingThis ? 'cyan' : 'white'}
-                  bold={isEditingThis}
-                >
-                  {isEditingThis ? '✎ ' : '  '}#{idx + 1}: {qp}
-                  {isEditingThis
-                    ? lang === 'en'
-                      ? ' (editing this position)'
-                      : ' (editando en esta posición)'
-                    : ''}
-                </Text>
-              );
-            })}
-          </Box>
-        )}
-
-        {matchingSlash.length > 0 && activeDialog === 'none' && (
-          <Box
-            flexDirection="column"
-            borderStyle="single"
-            borderColor="gray"
-            paddingX={1}
-          >
-            {matchingSlash.map((item, idx) => (
-              <Box key={item.cmd} flexDirection="row">
-                <Text color={idx === suggestionIdx ? 'cyan' : 'white'} bold>
-                  {idx === suggestionIdx ? '❯ ' : '  '}
-                  {item.displayCmd[lang].padEnd(14, ' ')}
-                </Text>
-                <Text color="gray">{item.desc[lang]}</Text>
-              </Box>
-            ))}
-          </Box>
-        )}
-
-        {/* Pensando... ("ESC" para cancelar, 6s) y gasto de sesión justo ARRIBA de Always Allow */}
-        {activeDialog === 'none' && (
-          <Box
-            flexDirection="row"
-            justifyContent="space-between"
-            paddingX={1}
-          >
-            <Box>
-              {isStreaming ? (
-                <Text color="cyan" bold>
-                  {lang === 'en'
-                    ? `✻ Thinking... ("ESC" to cancel, ${formatElapsedDuration(streamingElapsedMs)})`
-                    : `✻ Pensando... ("ESC" para cancelar, ${formatElapsedDuration(streamingElapsedMs)})`}
-                </Text>
-              ) : (
-                <Text color="gray">
-                  {`● ${formatSessionCostSummary(sessionCostUsd, lastTurnCostUsd, lastTurnDurationText, lang)}`}
-                </Text>
-              )}
-            </Box>
-            {isStreaming && (
-              <Text color="gray">
-                {`● ${formatSessionCostSummary(sessionCostUsd, lastTurnCostUsd, lastTurnDurationText, lang)}`}
-              </Text>
-            )}
-          </Box>
-        )}
-
-        {/* Barra justo arriba del chat: Izquierda (Modo + Sub-Modo) | Derecha (% Contexto · MCP activos · Skills) */}
-        {activeDialog === 'none' && (
-          <Box
-            flexDirection="row"
-            justifyContent="space-between"
-            paddingX={1}
-          >
-            <Text color={modeColor} bold>
-              {formatInputTopLeftMode(settings)}
-            </Text>
-            <Text color="gray">
-              {formatInputTopRightInfo(
-                sessionRef.current.history,
-                envCounts.mcpCount,
-                envCounts.skillCount,
-                lang,
-              )}
-            </Text>
-          </Box>
-        )}
-
-        {/* Caja de entrada anclada abajo (se oculta mientras hay un diálogo como /ajustes abierto) */}
-        {activeDialog === 'none' && (
-          <Box
-            borderStyle="round"
-            borderColor={editingQueueIdx !== null ? 'yellow' : 'gray'}
-            paddingX={1}
-          >
-            <Text color={editingQueueIdx !== null ? 'yellow' : 'cyan'} bold>
-              {editingQueueIdx !== null
-                ? `[${lang === 'en' ? 'Queue' : 'Cola'} #${editingQueueIdx + 1}] › `
-                : `${msgPrefixLabel} ${userTurnCounter + 1} > `}
-            </Text>
-            {inputText.length > 0 ? (
-              <Text color="white">{inputText}█</Text>
-            ) : (
-              <Text color="gray">
-                {lang === 'en'
-                  ? 'Ask Glitch CLI anything or type / for commands...'
-                  : 'Pide a Glitch CLI lo que quieras o escribe / para comandos...'}
-              </Text>
-            )}
-          </Box>
-        )}
-
-        {/* Barra inferior: ? para atajos · ← 1 agent · Salir: Ctrl+C a la izquierda | Modelo y Esfuerzo a la derecha */}
-        <Box
-          flexDirection="row"
-          justifyContent="space-between"
-          paddingX={1}
-          marginTop={0}
-        >
-          <Text color="gray">
-            {lang === 'en'
-              ? `? for shortcuts · ← ${activeAgentCount} agent · Exit: Ctrl+C`
-              : `? para atajos · ← ${activeAgentCount} agent · Salir: Ctrl+C`}
-          </Text>
-          <Text color="cyan">{formatStatusBar(settings)}</Text>
+          )}
         </Box>
+      ) : <Box flexGrow={1} />}
+      {activeDialog === 'none' && showScrollBottomBtn && (
+        <Box justifyContent="center" flexShrink={0}><Text color="cyan" bold>{`[${formatScrollToBottomLabel(newMsgsCount)}]`}</Text></Box>
+      )}
+      <Box flexDirection="column" flexShrink={0}>
+        {activeDialog === 'agents_chats' && (
+          <AgentsPanelView
+            settings={settings} sessionId={sessionId} messages={messages} history={sessionRef.current.history}
+            isStreaming={isStreaming} dialogCursor={dialogCursor} liveSubagents={liveSubagents}
+            savedSessionsList={savedSessionsList} activeChats={activeChatsList} columns={columns}
+            selectedSubagentId={selectedSubagentId} correctionInputText={correctionInputText}
+            pendingRelaunchConfirm={pendingRelaunchConfirm} showAllHistorySessions={showAllHistorySessions}
+            showAllAgentsHistory={showAllAgentsHistory} statusNotice={agentsPanelNotice}
+          />
+        )}
+        <DialogsView
+          activeDialog={activeDialog} settings={settings} version={version} dialogCursor={dialogCursor}
+          savedSessionsList={savedSessionsList} authStep={authStep} authChoiceIdx={authChoiceIdx} authBuffer={authBuffer}
+          modelPages={modelPages} modelPageIdx={modelPageIdx} pendingModelForEffort={pendingModelForEffort}
+          modelEffortIdx={modelEffortIdx} editingThresholdMode={editingThresholdMode} thresholdBuffer={thresholdBuffer}
+          thresholdError={thresholdError} pendingAskUser={pendingAskUser} askUserCursor={askUserCursor}
+          askUserCustomText={askUserCustomText} askUserCustomCursor={askUserCustomCursor} askUserTypingCustom={askUserTypingCustom}
+          mcpServers={mcpServers} installedSkills={installedSkills} activeSkillNames={activeSkillNames}
+          activeSkillContents={activeSkillContentsRef.current} contextBreakdown={contextBreakdown}
+          historyTurnCount={sessionRef.current.history.length} costRecords={costRecords}
+          chatCostSummary={chatCostSummary} lastTurnDurationText={lastTurnDurationText} showShortcutsPanel={showShortcutsPanel}
+        />
+        {activeDialog === 'none' && (
+          <>
+            <StatusBarTop
+              settings={settings} columns={columns} isStreaming={isStreaming} isCompactingContext={isCompactingContext}
+              streamingElapsedMs={streamingElapsedMs} currentTurnCostUsd={currentTurnCostUsd}
+              totalChatCostUsd={chatCostSummary.totalChatCostUsd} unknownPriceRequestCount={chatCostSummary.unknownPriceRequestCount}
+              mcpCount={mcpServers.filter((m) => Boolean(m.active)).length} skillCount={activeSkillNames.length}
+              maxContextTokens={activeModelContextWindow} totalUsedTokens={contextBreakdown.totalUsedTokens}
+              runningSubagents={runningSubagents} selectionMode={selectionMode} thoughtsCollapsed={thoughtsCollapsed}
+              transientStatusNotice={transientStatusNotice}
+            />
+            <InputBoxView
+              inputText={inputText} inputCursor={inputCursor} columns={columns} maxInputBoxLines={maxInputBoxLines}
+              userTurnCounter={userTurnCounter} editingQueueIdx={editingQueueIdx} confirmDeleteQueueIdx={confirmDeleteQueueIdx}
+              ctrlCPending={ctrlCPending} queuedPrompts={queuedPrompts} matchingSlash={matchingSlash} suggestionIdx={suggestionIdx}
+            />
+          </>
+        )}
+        <StatusBarBottom settings={settings} activeAgentCount={activeAgentCount} isCompactingContext={isCompactingContext} />
       </Box>
     </Box>
   );

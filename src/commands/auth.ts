@@ -42,9 +42,7 @@ export async function runAuthFlow(
     ).trim();
     const project = projectInput || defaultProject;
     if (!project) {
-      out(
-        '✗ Error: El proyecto de Google Cloud es obligatorio para Vertex AI.',
-      );
+      out('Error: El proyecto de Google Cloud es obligatorio para Vertex AI.');
       return currentSettings;
     }
 
@@ -64,7 +62,7 @@ export async function runAuthFlow(
 
     saveSettings(updated, customHomeDir);
     out(
-      `✓ Conectado a Vertex AI (proyecto: ${project}, región: ${location}) usando ADC.`,
+      `Conectado a Vertex AI (proyecto: ${project}, región: ${location}) usando ADC.`,
     );
     return updated;
   }
@@ -81,7 +79,7 @@ export async function runAuthFlow(
     const keyInput = (await ask(`API Key${currentMasked}: `)).trim();
     const apiKey = keyInput || currentSettings.custom?.apiKey || '';
     if (!apiKey) {
-      out('✗ Error: La API Key es obligatoria para la API personalizada.');
+      out('Error: La API Key es obligatoria para la API personalizada.');
       return currentSettings;
     }
 
@@ -104,11 +102,11 @@ export async function runAuthFlow(
 
     saveSettings(updated, customHomeDir);
     out(
-      `✓ API personalizada guardada (${baseUrl}, formato: ${format}, key: ${maskApiKey(apiKey)}).`,
+      `API personalizada guardada (${baseUrl}, formato: ${format}, key: ${maskApiKey(apiKey)}).`,
     );
     return updated;
   }
 
-  out('✗ Opción inválida. Usa 1 (Vertex AI) o 2 (API personalizada).');
+  out('Opción inválida. Usa 1 (Vertex AI) o 2 (API personalizada).');
   return currentSettings;
 }

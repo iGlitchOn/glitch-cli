@@ -8,7 +8,7 @@ import {
   formatCleanApiError,
   formatElapsedDuration,
 } from '../core/errorFormat.js';
-import { withRetryBackoff } from '../core/retry.js';
+import { isTransientError, withRetry, withRetryBackoff } from '../core/retry.js';
 import {
   CustomProviderAdapter,
   buildCustomRequestBody,
@@ -163,6 +163,53 @@ describe('Etapa 4: Proveedor personalizado, historial anti-400 de Vertex y reint
     expect(badRequestCalls).toBe(1);
   });
 
+  it('detecta y se recupera ante "TypeError: fetch failed sending request" y códigos de red/5xx en isTransientError y withRetry', async () => {
+    expect(
+      isTransientError(new TypeError('fetch failed sending request')),
+    ).toBe(true);
+    expect(isTransientError(new Error('TypeError: fetch failed'))).toBe(true);
+    expect(isTransientError(new Error('fetch failed'))).toBe(true);
+    expect(isTransientError({ code: 'ECONNRESET', message: 'reset' })).toBe(
+      true,
+    );
+    expect(isTransientError({ code: 'ETIMEDOUT', message: 'timeout' })).toBe(
+      true,
+    );
+    expect(isTransientError({ code: 'EAI_AGAIN', message: 'dns' })).toBe(true);
+    expect(
+      isTransientError({ code: 'UND_ERR_SOCKET', message: 'socket closed' }),
+    ).toBe(true);
+    expect(isTransientError(new Error('socket hang up'))).toBe(true);
+    expect(isTransientError({ status: 429 })).toBe(true);
+    expect(isTransientError({ status: 500 })).toBe(true);
+    expect(isTransientError({ status: 502 })).toBe(true);
+    expect(isTransientError({ status: 503 })).toBe(true);
+    expect(isTransientError({ status: 504 })).toBe(true);
+    expect(isTransientError({ status: 400 })).toBe(false);
+    expect(isTransientError({ status: 401 })).toBe(false);
+
+    let attempts = 0;
+    const retryLog: number[] = [];
+    const result = await withRetry(
+      async () => {
+        attempts++;
+        if (attempts <= 3) {
+          throw new TypeError('fetch failed sending request');
+        }
+        return 'recuperado-ok';
+      },
+      {
+        maxRetries: 8,
+        baseDelayMs: 1,
+        onRetry: (att) => retryLog.push(att),
+      },
+    );
+
+    expect(result).toBe('recuperado-ok');
+    expect(attempts).toBe(4);
+    expect(retryLog).toEqual([1, 2, 3]);
+  });
+
   it('adapta API personalizada (/v1/chat/completions y /v1/responses) mapeando effort a reasoning_effort y ocultando la API key en errores', async () => {
     expect(
       buildEndpointUrl('https://api.example.com', 'chat_completions'),
@@ -247,5 +294,128 @@ describe('Etapa 4: Proveedor personalizado, historial anti-400 de Vertex y reint
     expect(formatElapsedDuration(90 * 60 * 1000)).toBe('1h 30m');
     expect(formatElapsedDuration(75 * 1000)).toBe('1m 15s');
     expect(formatElapsedDuration(8 * 1000)).toBe('8s');
+  });
+
+  it('soporta systemInstruction, enableTools, tool_calls y functionResponse en CustomProviderAdapter', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Lee el archivo package.json' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_read_1',
+              name: 'read_file',
+              args: { file_path: 'package.json' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_read_1',
+              name: 'read_file',
+              response: { result: '{"name":"glitch-cli"}' },
+            },
+          },
+        ],
+      },
+    ];
+
+    const body = buildCustomRequestBody(
+      {
+        baseUrl: 'https://api.example.com',
+        apiKey: 'sk-test-1234',
+        format: 'chat_completions',
+      },
+      history,
+      {
+        model: 'gpt-4o',
+        effort: 'medium',
+        includeThoughts: true,
+        subMode: 'agent',
+        systemInstruction: 'Instrucción de sistema Glitch',
+        enableTools: true,
+      },
+    );
+
+    const messages = body['messages'] as Array<Record<string, unknown>>;
+    expect(messages[0]).toEqual({
+      role: 'system',
+      content: 'Instrucción de sistema Glitch',
+    });
+    expect(messages[2]).toMatchObject({
+      role: 'assistant',
+      tool_calls: [
+        {
+          id: 'call_read_1',
+          type: 'function',
+          function: {
+            name: 'read_file',
+            arguments: JSON.stringify({ file_path: 'package.json' }),
+          },
+        },
+      ],
+    });
+    expect(messages[3]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call_read_1',
+      name: 'read_file',
+    });
+    expect(Array.isArray(body['tools'])).toBe(true);
+
+    const fakeFetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'call_shell_99',
+                  type: 'function',
+                  function: {
+                    name: 'run_shell_command',
+                    arguments: '{"command":"whoami"}',
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    })) as unknown as typeof fetch;
+
+    const adapter = new CustomProviderAdapter(
+      {
+        baseUrl: 'https://api.example.com',
+        apiKey: 'sk-test-1234',
+        format: 'chat_completions',
+      },
+      fakeFetch,
+    );
+
+    const chunks = [];
+    for await (const ch of adapter.streamTurn(history, {
+      model: 'gpt-4o',
+      effort: 'medium',
+      includeThoughts: true,
+      subMode: 'agent',
+      enableTools: true,
+    })) {
+      chunks.push(ch);
+    }
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.rawParts?.[0]?.functionCall).toEqual({
+      id: 'call_shell_99',
+      name: 'run_shell_command',
+      args: { command: 'whoami' },
+    });
   });
 });

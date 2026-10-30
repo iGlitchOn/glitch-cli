@@ -3,7 +3,7 @@ import {
   type GoogleGenAI,
   type ThinkingConfig,
 } from '@google/genai';
-import type { EffortLevel, ProviderType } from './settings.js';
+import type { CustomApiConfig, EffortLevel, ProviderType } from './settings.js';
 
 export type ModelFamily =
   | 'gemini'
@@ -19,16 +19,26 @@ export interface ModelFamilyPage {
   models: ModelDefinition[];
 }
 
+export type ContextWindowVerificationStatus =
+  | 'verificado'
+  | 'sin verificar'
+  | 'no aplica';
+
 export interface ModelDefinition {
   id: string;
   name: string;
   family: ModelFamily;
-  releaseDate: string; // YYYY-MM-DD para ordenar más reciente arriba
+  releaseDate: string;
   supportedEfforts: EffortLevel[];
   defaultEffort?: EffortLevel;
   supportsThoughts: boolean;
   forbidThinkingBudget?: boolean;
+  contextWindow: number | null;
+  contextWindowStatus?: ContextWindowVerificationStatus;
 }
+
+export const DEFAULT_GEMINI_CONTEXT_WINDOW = 1_048_576;
+export const GEMMA_3_CONTEXT_WINDOW = 131_072;
 
 const EFFORT_SORT_ORDER: Record<EffortLevel, number> = {
   low: 1,
@@ -48,11 +58,6 @@ export function formatOrderedEfforts(efforts: readonly EffortLevel[]): string {
 
 const UPPERCASE_TOKENS = new Set(['it', 'pt', 'tts', 'stt', 'hq', 'ai']);
 
-/**
- * Convierte cualquier ID de modelo (ej. "gemini-3.5-flash-lite", "gemini-2.5-flash-preview-04-17",
- * "gemini-1.5-pro-002", "gemma-3-27b-it") en un nombre físico limpio y legible,
- * para que nunca aparezca el ID crudo con guiones en la columna NOMBRE DEL MODELO.
- */
 export function formatHumanModelName(
   rawId: string,
   apiDisplayName?: string,
@@ -76,7 +81,6 @@ export function formatHumanModelName(
     return 'Nano Banana Pro (Gemini 3 Pro Image)';
   }
 
-  // Reemplaza "flash-lite" temporalmente para mantener el guion "Flash-Lite"
   const normalized = cleanId.replace(/flash-lite/gi, 'FlashLiteToken');
   const tokens = normalized.split('-').filter(Boolean);
 
@@ -90,7 +94,6 @@ export function formatHumanModelName(
       continue;
     }
 
-    // Si son dos números de mes-día al final (ej. 04-17 o 03-25)
     if (
       i === tokens.length - 2 &&
       /^\d{2}$/.test(tok) &&
@@ -100,13 +103,11 @@ export function formatHumanModelName(
       break;
     }
 
-    // Sufijo de revisión de 3 dígitos (ej. 001, 002)
     if (i === tokens.length - 1 && /^\d{3}$/.test(tok)) {
       formattedTokens.push(tok);
       continue;
     }
 
-    // Tamaños de parámetros como 27b, 12b, 4b, 9b
     if (/^\d+b$/i.test(tok)) {
       formattedTokens.push(tok.toUpperCase());
       continue;
@@ -117,24 +118,21 @@ export function formatHumanModelName(
       continue;
     }
 
-    // Versiones numéricas como 4, 3.1, 2.5, 1.5
     if (/^\d+(\.\d+)?$/.test(tok)) {
       formattedTokens.push(tok);
       continue;
     }
 
-    formattedTokens.push(tok.charAt(0).toUpperCase() + tok.slice(1).toLowerCase());
+    formattedTokens.push(
+      tok.charAt(0).toUpperCase() + tok.slice(1).toLowerCase(),
+    );
   }
 
   return formattedTokens.join(' ');
 }
 
-/**
- * Registro local de modelos oficiales de Google en Vertex AI,
- * separados estrictamente por categoría y con fecha de lanzamiento (YYYY-MM-DD).
- */
 export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
-  // Página 1: Gemini
+  // Página 1: Gemini (1.048.576 tokens)
   {
     id: 'gemini-4-argon',
     name: 'Gemini 4 Argon',
@@ -144,6 +142,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     defaultEffort: 'medium',
     supportsThoughts: true,
     forbidThinkingBudget: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-4-argon-cyber-permissive',
@@ -154,6 +154,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     defaultEffort: 'high',
     supportsThoughts: true,
     forbidThinkingBudget: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-3.1-pro-preview',
@@ -164,6 +166,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     defaultEffort: 'high',
     supportsThoughts: true,
     forbidThinkingBudget: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-3.1-flash-lite-preview',
@@ -174,6 +178,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     defaultEffort: 'medium',
     supportsThoughts: true,
     forbidThinkingBudget: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-3-pro-preview',
@@ -184,6 +190,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     defaultEffort: 'high',
     supportsThoughts: true,
     forbidThinkingBudget: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-3-flash-preview',
@@ -194,6 +202,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     defaultEffort: 'medium',
     supportsThoughts: true,
     forbidThinkingBudget: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-2.5-pro',
@@ -202,6 +212,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-06-17',
     supportedEfforts: [],
     supportsThoughts: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-2.5-flash',
@@ -210,6 +222,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-06-17',
     supportedEfforts: [],
     supportsThoughts: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-2.5-flash-lite',
@@ -218,6 +232,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-06-17',
     supportedEfforts: [],
     supportsThoughts: true,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-2.0-flash',
@@ -226,6 +242,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-02-05',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
   {
     id: 'gemini-2.0-flash-lite',
@@ -234,9 +252,11 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-02-05',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   },
 
-  // Página 2: Gemma
+  // Página 2: Gemma (131.072 tokens, marcado "sin verificar")
   {
     id: 'gemma-3-27b-it',
     name: 'Gemma 3 27B IT',
@@ -244,6 +264,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-03-12',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: GEMMA_3_CONTEXT_WINDOW,
+    contextWindowStatus: 'sin verificar',
   },
   {
     id: 'gemma-3-12b-it',
@@ -252,6 +274,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-03-12',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: GEMMA_3_CONTEXT_WINDOW,
+    contextWindowStatus: 'sin verificar',
   },
   {
     id: 'gemma-3-4b-it',
@@ -260,9 +284,11 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-03-12',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: GEMMA_3_CONTEXT_WINDOW,
+    contextWindowStatus: 'sin verificar',
   },
 
-  // Página 3: Nano Banana & Imagen
+  // Página 3: Nano Banana & Imagen (no aplica)
   {
     id: 'gemini-3-pro-image-preview',
     name: 'Nano Banana Pro (Gemini 3 Pro Image)',
@@ -272,6 +298,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     defaultEffort: 'high',
     supportsThoughts: true,
     forbidThinkingBudget: true,
+    contextWindow: null,
+    contextWindowStatus: 'no aplica',
   },
   {
     id: 'gemini-2.5-flash-image',
@@ -280,6 +308,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-08-26',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: null,
+    contextWindowStatus: 'no aplica',
   },
   {
     id: 'imagen-3.0-generate-002',
@@ -288,6 +318,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-02-01',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: null,
+    contextWindowStatus: 'no aplica',
   },
   {
     id: 'imagen-3.0-fast-generate-001',
@@ -296,9 +328,11 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-02-01',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: null,
+    contextWindowStatus: 'no aplica',
   },
 
-  // Página 4: Embeddings
+  // Página 4: Embeddings (no aplica)
   {
     id: 'gemini-embedding-2-preview',
     name: 'Gemini Embedding 2 Preview',
@@ -306,6 +340,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2026-02-10',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: null,
+    contextWindowStatus: 'no aplica',
   },
   {
     id: 'gemini-embedding-001',
@@ -314,6 +350,8 @@ export const LOCAL_GOOGLE_MODELS: readonly ModelDefinition[] = [
     releaseDate: '2025-05-20',
     supportedEfforts: [],
     supportsThoughts: false,
+    contextWindow: null,
+    contextWindowStatus: 'no aplica',
   },
 ];
 
@@ -464,29 +502,62 @@ export function getModelDefinition(
   modelId: string,
   provider: ProviderType = 'vertex',
   apiDisplayName?: string,
+  customConfig?: CustomApiConfig,
 ): ModelDefinition {
   const cleanId = normalizeModelId(modelId);
+
+  if (provider === 'custom') {
+    const customWindow =
+      customConfig?.contextWindow && customConfig.contextWindow > 0
+        ? customConfig.contextWindow
+        : DEFAULT_GEMINI_CONTEXT_WINDOW;
+    return {
+      id: cleanId,
+      name: formatHumanModelName(cleanId, apiDisplayName),
+      family: 'custom',
+      releaseDate: '2026-01-01',
+      supportedEfforts: ['low', 'medium', 'high'],
+      defaultEffort: 'medium',
+      supportsThoughts: true,
+      contextWindow: customWindow,
+      contextWindowStatus: 'sin verificar',
+    };
+  }
+
   const found = LOCAL_GOOGLE_MODELS.find((m) => m.id === cleanId);
   if (found) {
     return found;
   }
 
   const humanName = formatHumanModelName(cleanId, apiDisplayName);
+  const family = inferModelFamily(cleanId);
+  const releaseDate = inferReleaseDate(cleanId);
 
-  if (provider === 'custom') {
+  if (family === 'gemma') {
     return {
       id: cleanId,
       name: humanName,
-      family: 'custom',
-      releaseDate: '2026-01-01',
-      supportedEfforts: ['low', 'medium', 'high'],
-      defaultEffort: 'medium',
-      supportsThoughts: true,
+      family,
+      releaseDate,
+      supportedEfforts: [],
+      supportsThoughts: false,
+      contextWindow: GEMMA_3_CONTEXT_WINDOW,
+      contextWindowStatus: 'sin verificar',
     };
   }
 
-  const family = inferModelFamily(cleanId);
-  const releaseDate = inferReleaseDate(cleanId);
+  if (family === 'nano-banana' || family === 'embeddings') {
+    return {
+      id: cleanId,
+      name: humanName,
+      family,
+      releaseDate,
+      supportedEfforts: [],
+      supportsThoughts: false,
+      contextWindow: null,
+      contextWindowStatus: 'no aplica',
+    };
+  }
 
   if (family !== 'gemini') {
     return {
@@ -496,6 +567,8 @@ export function getModelDefinition(
       releaseDate,
       supportedEfforts: [],
       supportsThoughts: false,
+      contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+      contextWindowStatus: 'sin verificar',
     };
   }
 
@@ -509,6 +582,8 @@ export function getModelDefinition(
       defaultEffort: 'high',
       supportsThoughts: true,
       forbidThinkingBudget: true,
+      contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+      contextWindowStatus: 'verificado',
     };
   }
 
@@ -522,6 +597,8 @@ export function getModelDefinition(
       defaultEffort: 'medium',
       supportsThoughts: true,
       forbidThinkingBudget: true,
+      contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+      contextWindowStatus: 'verificado',
     };
   }
 
@@ -532,7 +609,18 @@ export function getModelDefinition(
     releaseDate,
     supportedEfforts: [],
     supportsThoughts: cleanId.startsWith('gemini-2.5'),
+    contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
+    contextWindowStatus: 'verificado',
   };
+}
+
+export function getModelContextWindow(
+  modelId: string,
+  provider: ProviderType = 'vertex',
+  customConfig?: CustomApiConfig,
+): number {
+  const def = getModelDefinition(modelId, provider, undefined, customConfig);
+  return def.contextWindow ?? DEFAULT_GEMINI_CONTEXT_WINDOW;
 }
 
 export async function listVertexGoogleModels(
@@ -583,6 +671,105 @@ const EFFORT_TO_THINKING_LEVEL: Record<EffortLevel, ThinkingLevel> = {
   high: ThinkingLevel.HIGH,
 };
 
+const EFFORT_LABELS_ES: Record<EffortLevel, string> = {
+  low: 'Bajo',
+  medium: 'Medio',
+  high: 'Alto',
+};
+
+export interface EffectiveEffortResolution {
+  effectiveEffort: EffortLevel;
+  supported: boolean;
+  wasAdjusted: boolean;
+  warningMessage?: string;
+}
+
+export function resolveEffectiveEffortForModel(
+  modelId: string,
+  requestedEffort: EffortLevel,
+  provider: ProviderType = 'vertex',
+): EffectiveEffortResolution {
+  const def = getModelDefinition(modelId, provider);
+  if (def.supportedEfforts.length === 0) {
+    return {
+      effectiveEffort: requestedEffort,
+      supported: false,
+      wasAdjusted: false,
+    };
+  }
+  if (def.supportedEfforts.includes(requestedEffort)) {
+    return {
+      effectiveEffort: requestedEffort,
+      supported: true,
+      wasAdjusted: false,
+    };
+  }
+  const fallback = def.defaultEffort ?? def.supportedEfforts[0]!;
+  const reqEs = EFFORT_LABELS_ES[requestedEffort] ?? requestedEffort;
+  const fbEs = EFFORT_LABELS_ES[fallback] ?? fallback;
+  return {
+    effectiveEffort: fallback,
+    supported: true,
+    wasAdjusted: true,
+    warningMessage: `El esfuerzo guardado (${reqEs}) no es compatible con ${def.name}; se corrigió a ${fbEs} (${fallback.toUpperCase()}).`,
+  };
+}
+
+export interface ApiRequestDebugEntry {
+  timestamp: string;
+  provider: string;
+  model: string;
+  effort: EffortLevel;
+  thinkingParameter: string;
+  subMode: string;
+  includeThoughts: boolean;
+  message: string;
+}
+
+const apiRequestDebugLogs: ApiRequestDebugEntry[] = [];
+
+export function recordApiRequestDebugLog(
+  entry: Omit<ApiRequestDebugEntry, 'timestamp' | 'message'> & {
+    timestamp?: string;
+    message?: string;
+  },
+): ApiRequestDebugEntry {
+  const ts = entry.timestamp ?? new Date().toISOString();
+  const effortEs = EFFORT_LABELS_ES[entry.effort] ?? entry.effort;
+  const msg =
+    entry.message ??
+    `[DEBUG API] provider=${entry.provider} | model=${entry.model} | effort=${entry.effort} (${effortEs}) | param=${entry.thinkingParameter} | subMode=${entry.subMode} | thoughts=${entry.includeThoughts}`;
+  const full: ApiRequestDebugEntry = {
+    timestamp: ts,
+    provider: entry.provider,
+    model: entry.model,
+    effort: entry.effort,
+    thinkingParameter: entry.thinkingParameter,
+    subMode: entry.subMode,
+    includeThoughts: entry.includeThoughts,
+    message: msg,
+  };
+  apiRequestDebugLogs.push(full);
+  if (apiRequestDebugLogs.length > 200) {
+    apiRequestDebugLogs.shift();
+  }
+  if (
+    process.env['GLITCH_DEBUG'] === '1' ||
+    process.env['GLITCH_DEBUG'] === 'true'
+  ) {
+    console.debug(msg);
+  }
+  return full;
+}
+
+export function getApiRequestDebugLogs(): readonly ApiRequestDebugEntry[] {
+  return apiRequestDebugLogs;
+}
+
+export function clearApiRequestDebugLogs(): void {
+  apiRequestDebugLogs.length = 0;
+}
+
 export function buildVertexThinkingConfig(
   modelId: string,
   effort: EffortLevel,
@@ -599,9 +786,11 @@ export function buildVertexThinkingConfig(
   };
 
   if (def.supportedEfforts.length > 0) {
-    const effectiveEffort = def.supportedEfforts.includes(effort)
-      ? effort
-      : (def.defaultEffort ?? def.supportedEfforts[0]!);
+    const { effectiveEffort } = resolveEffectiveEffortForModel(
+      modelId,
+      effort,
+      'vertex',
+    );
     config.thinkingLevel = EFFORT_TO_THINKING_LEVEL[effectiveEffort];
   }
 
