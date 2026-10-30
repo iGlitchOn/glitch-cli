@@ -53,6 +53,7 @@ export interface CommandDispatchContext {
   exit: () => void;
   setShowShortcutsPanel: React.Dispatch<React.SetStateAction<boolean>>;
   addSystemMessage: (text: string) => void;
+  addUsageMessage?: () => void;
   resetNewSessionUi: (nextId: string) => void;
   resumeSavedSessionUi: (found: SavedSession, prefixText?: string) => void;
   setSavedSessionsList: (list: SavedSession[]) => void;
@@ -282,6 +283,10 @@ export function executeTuiInputCommand(
     return;
   }
   if (resolved === '/usage' || resolved.startsWith('/usage ')) {
+    if (ctx.addUsageMessage) {
+      ctx.addUsageMessage();
+      return;
+    }
     ctx.setDialogCursor(0);
     ctx.setActiveDialog('usage');
     return;

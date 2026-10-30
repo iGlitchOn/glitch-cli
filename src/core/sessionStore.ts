@@ -13,6 +13,7 @@ export interface SavedUiMessage {
   subthinking?: string;
   blockTitle?: string;
   isBlockSummary?: boolean;
+  isUsageReport?: boolean;
   toolCallId?: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;

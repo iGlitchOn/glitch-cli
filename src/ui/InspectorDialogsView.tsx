@@ -93,6 +93,96 @@ function buildModelUsageTableRows(
   return Array.from(map.values());
 }
 
+export interface UsageStatsCardProps {
+  settings: GlitchSettings;
+  activeSkillNames: readonly string[];
+  contextBreakdown: ContextUsageBreakdown;
+  historyTurnCount: number;
+  costRecords: readonly CostRequestRecord[];
+  chatCostSummary: ChatCostSummary;
+  lastTurnDurationText: string;
+  showCloseHint?: boolean;
+}
+
+export const UsageStatsCard: React.FC<UsageStatsCardProps> = ({
+  settings,
+  activeSkillNames,
+  contextBreakdown,
+  historyTurnCount,
+  costRecords,
+  chatCostSummary,
+  lastTurnDurationText,
+  showCloseHint = false,
+}) => {
+  const modelRows = buildModelUsageTableRows(costRecords, settings);
+  const authLabel =
+    settings.provider === 'custom' ? 'custom-api' : 'vertex-ai';
+  const histTokens =
+    contextBreakdown.historyTextTokens +
+    contextBreakdown.historyThoughtTokens +
+    contextBreakdown.historyToolCallTokens;
+
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="single"
+      borderColor="cyan"
+      paddingX={2}
+      paddingY={1}
+    >
+      <Box flexDirection="row" justifyContent="space-between" marginBottom={1}>
+        <Text bold color="cyan">
+          {'Estadísticas de Sesión (/usage)'}
+        </Text>
+        {showCloseHint && (
+          <Text color="gray" dimColor>{'enter o esc cerrar'}</Text>
+        )}
+      </Box>
+
+      <Text bold color="white">{'Resumen de Interacción'}</Text>
+      <Box flexDirection="row">
+        <Text color="cyan">{'Proveedor:          '}</Text>
+        <Text color="white">{authLabel}</Text>
+      </Box>
+      <Box flexDirection="row">
+        <Text color="cyan">{'Contexto usado:     '}</Text>
+        <Text color="white">
+          {`${contextBreakdown.totalUsedTokens.toLocaleString('en-US')} / ${contextBreakdown.maxTokens.toLocaleString('en-US')} tok (${contextBreakdown.usedPercent}%)`}
+        </Text>
+      </Box>
+      <Box flexDirection="row">
+        <Text color="cyan">{'Desglose contexto:  '}</Text>
+        <Text color="gray">
+          {`System+Tools ~${(contextBreakdown.baseSystemTokens + contextBreakdown.toolSchemaTokens).toLocaleString('en-US')} · Skills (${activeSkillNames.length}) ~${contextBreakdown.activeSkillsTokens.toLocaleString('en-US')} · Historial (${historyTurnCount}) ~${histTokens.toLocaleString('en-US')}`}
+        </Text>
+      </Box>
+      <Box flexDirection="row">
+        <Text color="cyan">{'Tiempo último turno:'}</Text>
+        <Text color="white">{` ${lastTurnDurationText}`}</Text>
+      </Box>
+      <Box flexDirection="row">
+        <Text color="cyan">{'Costo total sesión: '}</Text>
+        <Text color="green" bold>
+          {formatChatTotalAmount(chatCostSummary.totalChatCostUsd)}
+        </Text>
+      </Box>
+
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold color="white">{'Uso y Precios por Modelo (USD / 1M tokens)'}</Text>
+        <Text color="gray">
+          {`${'Modelo'.padEnd(25, ' ')}${'Reqs'.padStart(5, ' ')}${'Entrada'.padStart(12, ' ')}${'Caché'.padStart(12, ' ')}${'Salida'.padStart(11, ' ')}  ${'Tarifa (In/Caché/Out)'.padEnd(21, ' ')}${'Costo'.padStart(10, ' ')}`}
+        </Text>
+        <Text color="gray" dimColor>{'─'.repeat(98)}</Text>
+        {modelRows.map((row) => (
+          <Text key={row.modelId} color="white">
+            {`${row.modelId.slice(0, 24).padEnd(25, ' ')}${String(row.reqs).padStart(5, ' ')}${row.inputTokens.toLocaleString('en-US').padStart(12, ' ')}${row.cachedTokens.toLocaleString('en-US').padStart(12, ' ')}${row.outputTokens.toLocaleString('en-US').padStart(11, ' ')}  ${row.rateText.padEnd(21, ' ')}${formatUsdAmount(row.costUsd).padStart(10, ' ')}`}
+          </Text>
+        ))}
+      </Box>
+    </Box>
+  );
+};
+
 export const InspectorDialogsView: React.FC<InspectorDialogsViewProps> = ({
   activeDialog,
   settings,
@@ -214,70 +304,17 @@ export const InspectorDialogsView: React.FC<InspectorDialogsViewProps> = ({
   }
 
   if (activeDialog === 'usage') {
-    const modelRows = buildModelUsageTableRows(costRecords, settings);
-    const authLabel =
-      settings.provider === 'custom' ? 'custom-api' : 'vertex-ai';
-    const histTokens =
-      contextBreakdown.historyTextTokens +
-      contextBreakdown.historyThoughtTokens +
-      contextBreakdown.historyToolCallTokens;
-
     return (
-      <Box
-        flexDirection="column"
-        borderStyle="single"
-        borderColor="cyan"
-        paddingX={2}
-        paddingY={1}
-      >
-        <Box flexDirection="row" justifyContent="space-between" marginBottom={1}>
-          <Text bold color="cyan">
-            {'Estadísticas de Sesión (/usage)'}
-          </Text>
-          <Text color="gray" dimColor>{'enter o esc cerrar'}</Text>
-        </Box>
-
-        <Text bold color="white">{'Resumen de Interacción'}</Text>
-        <Box flexDirection="row">
-          <Text color="cyan">{'Proveedor:          '}</Text>
-          <Text color="white">{authLabel}</Text>
-        </Box>
-        <Box flexDirection="row">
-          <Text color="cyan">{'Contexto usado:     '}</Text>
-          <Text color="white">
-            {`${contextBreakdown.totalUsedTokens.toLocaleString('en-US')} / ${contextBreakdown.maxTokens.toLocaleString('en-US')} tok (${contextBreakdown.usedPercent}%)`}
-          </Text>
-        </Box>
-        <Box flexDirection="row">
-          <Text color="cyan">{'Desglose contexto:  '}</Text>
-          <Text color="gray">
-            {`System+Tools ~${(contextBreakdown.baseSystemTokens + contextBreakdown.toolSchemaTokens).toLocaleString('en-US')} · Skills (${activeSkillNames.length}) ~${contextBreakdown.activeSkillsTokens.toLocaleString('en-US')} · Historial (${historyTurnCount}) ~${histTokens.toLocaleString('en-US')}`}
-          </Text>
-        </Box>
-        <Box flexDirection="row">
-          <Text color="cyan">{'Tiempo último turno:'}</Text>
-          <Text color="white">{` ${lastTurnDurationText}`}</Text>
-        </Box>
-        <Box flexDirection="row">
-          <Text color="cyan">{'Costo total sesión: '}</Text>
-          <Text color="green" bold>
-            {formatChatTotalAmount(chatCostSummary.totalChatCostUsd)}
-          </Text>
-        </Box>
-
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color="white">{'Uso y Precios por Modelo (USD / 1M tokens)'}</Text>
-          <Text color="gray">
-            {`${'Modelo'.padEnd(25, ' ')}${'Reqs'.padStart(5, ' ')}${'Entrada'.padStart(12, ' ')}${'Caché'.padStart(12, ' ')}${'Salida'.padStart(11, ' ')}  ${'Tarifa (In/Caché/Out)'.padEnd(21, ' ')}${'Costo'.padStart(10, ' ')}`}
-          </Text>
-          <Text color="gray" dimColor>{'─'.repeat(98)}</Text>
-          {modelRows.map((row) => (
-            <Text key={row.modelId} color="white">
-              {`${row.modelId.slice(0, 24).padEnd(25, ' ')}${String(row.reqs).padStart(5, ' ')}${row.inputTokens.toLocaleString('en-US').padStart(12, ' ')}${row.cachedTokens.toLocaleString('en-US').padStart(12, ' ')}${row.outputTokens.toLocaleString('en-US').padStart(11, ' ')}  ${row.rateText.padEnd(21, ' ')}${formatUsdAmount(row.costUsd).padStart(10, ' ')}`}
-            </Text>
-          ))}
-        </Box>
-      </Box>
+      <UsageStatsCard
+        settings={settings}
+        activeSkillNames={activeSkillNames}
+        contextBreakdown={contextBreakdown}
+        historyTurnCount={historyTurnCount}
+        costRecords={costRecords}
+        chatCostSummary={chatCostSummary}
+        lastTurnDurationText={lastTurnDurationText}
+        showCloseHint
+      />
     );
   }
 

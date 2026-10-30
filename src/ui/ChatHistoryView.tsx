@@ -54,6 +54,7 @@ export interface ChatHistoryViewProps {
   streamingElapsedMs?: number;
   nextStreamingReplyNumber: number;
   liveSubagents?: readonly LiveSubagentInfo[];
+  usageCardNode?: React.ReactNode;
 }
 
 export const ChatHistoryView: React.FC<ChatHistoryViewProps> = React.memo(({
@@ -70,6 +71,7 @@ export const ChatHistoryView: React.FC<ChatHistoryViewProps> = React.memo(({
   liveText,
   nextStreamingReplyNumber,
   liveSubagents = [],
+  usageCardNode,
 }) => {
   const renderThoughtTokensLine = (tokens: readonly InlineToken[], keyIdx: number) => (
     <Text key={keyIdx}>
@@ -238,6 +240,19 @@ export const ChatHistoryView: React.FC<ChatHistoryViewProps> = React.memo(({
         const hasThoughtText = Boolean(
           thoughtsEnabled && m.thoughtText && m.thoughtText.trim().length > 0,
         );
+
+        if (m.isUsageReport && usageCardNode) {
+          return (
+            <Box
+              key={m.id}
+              flexDirection="column"
+              marginTop={0}
+              marginBottom={1}
+            >
+              {usageCardNode}
+            </Box>
+          );
+        }
 
         if (m.isBlockSummary) {
           return (

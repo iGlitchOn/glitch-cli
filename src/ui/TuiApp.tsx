@@ -19,6 +19,7 @@ import { ChatHistoryView, type NumberedUiMessage } from './ChatHistoryView.js';
 import { DaaSplashView, DialogsView, type ActiveDialog, type PendingAskUserPrompt } from './DialogsView.js';
 import { HeaderBanner } from './HeaderBanner.js';
 import { InputBoxView } from './InputBoxView.js';
+import { UsageStatsCard } from './InspectorDialogsView.js';
 import { buildLineLinkMap } from './markdownTokens.js';
 import { StatusBarBottom, StatusBarTop } from './StatusBarView.js';
 import { executeTuiInputCommand, handleActiveDialogInput, handleMainEditorKeyInput } from './tuiInputHandlers.js';
@@ -219,6 +220,22 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       return next;
     });
   };
+  const addUsageMessage = () => {
+    setMessages((prev) => {
+      const next: SavedUiMessage[] = [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random()}-usage`,
+          role: 'system',
+          text: 'Estadísticas de Sesión (/usage)',
+          isUsageReport: true,
+        },
+      ];
+      messagesRef.current = next;
+      return next;
+    });
+    updateScrollState({ scrollTop: 0, isAtBottom: true });
+  };
   const syncQueueState = () => setQueuedPrompts([...queueRef.current]);
   const refreshModels = async (cfg: GlitchSettings) => {
     if (cfg.provider === 'vertex' && cfg.vertex) {
@@ -309,7 +326,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
           setActiveDialog('model');
         }
       },
-      onOpenUsageDialog: () => { setDialogCursor(0); setActiveDialog('usage'); },
+      onOpenUsageDialog: () => { addUsageMessage(); },
       onOpenSettingsDialog: () => {
         setDialogCursor(0); setEditingThresholdMode(false);
         setThresholdError(''); setActiveDialog('settings');
@@ -379,7 +396,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       availableModels, modelPages, installedSkills,
       activeSkillContents: activeSkillContentsRef.current,
       lastTurnCostUsd, sessionCostUsd, persistCurrentSession, exit,
-      setShowShortcutsPanel, addSystemMessage, resetNewSessionUi,
+      setShowShortcutsPanel, addSystemMessage, addUsageMessage, resetNewSessionUi,
       resumeSavedSessionUi, setSavedSessionsList, setDialogCursor,
       setActiveDialog, setAuthStep, setAuthChoiceIdx, setAuthBuffer,
       setSettings, setEditingThresholdMode, setThresholdError,
@@ -509,7 +526,14 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   const queueLinesEstimate = queuedPrompts.length > 0 && activeDialog === 'none' ? queuedPrompts.length * 2 + 3 : 0;
   const bottomZoneEstimate = 2 + visibleInputBoxLines + 2 + queueLinesEstimate + (isStreaming ? 1 : 0);
   const estimatedViewportHeight = Math.max(1, rows - (showHeader ? 5 : 0) - bottomZoneEstimate);
-  const estimatedContentHeight = useMemo(() => numberedMessages.reduce((acc, m) => acc + Math.max(1, m.text.split('\n').length) + 1, 0), [numberedMessages]);
+  const estimatedContentHeight = useMemo(
+    () =>
+      numberedMessages.reduce(
+        (acc, m) => acc + (m.isUsageReport ? 16 : Math.max(1, m.text.split('\n').length) + 1),
+        0,
+      ),
+    [numberedMessages],
+  );
   const computedVpH = chatViewportRef.current?.yogaNode?.getComputedLayout().height ?? 0;
   const computedContH = chatContentRef.current?.yogaNode?.getComputedLayout().height ?? 0;
   const effectiveViewportHeight = computedVpH > 0 ? computedVpH : estimatedViewportHeight;
@@ -523,32 +547,42 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   });
   const showScrollBottomBtn = shouldShowScrollToBottomButton(scrollState, maxScrollTop);
   const newMsgsCount = scrollState.isAtBottom ? 0 : Math.max(0, messages.length - seenMsgCountAtBottom);
+  const usageCardElement = (
+    <UsageStatsCard
+      settings={settings}
+      activeSkillNames={activeSkillNames}
+      contextBreakdown={contextBreakdown}
+      historyTurnCount={sessionRef.current.history.length}
+      costRecords={costRecords}
+      chatCostSummary={chatCostSummary}
+      lastTurnDurationText={lastTurnDurationText}
+    />
+  );
   return (
     <Box flexDirection="column" width={columns} height={rows} paddingX={1} overflow="hidden">
       {showHeader && <Box flexDirection="column" flexShrink={0}><HeaderBanner settings={settings} version={version} /></Box>}
-      {activeDialog === 'none' ? (
-        <Box flexDirection="row" flexGrow={1} flexShrink={1} overflow="hidden">
-          <Box ref={chatViewportRef} flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden" contentOffsetY={effectiveScrollTop}>
-            <Box ref={chatContentRef} flexDirection="column" flexShrink={0}>
-              <ChatHistoryView
-                numberedMessages={numberedMessages} uniformBoxWidth={uniformBoxWidth} uniformBoxInnerWidth={uniformBoxInnerWidth}
-                thoughtsEnabled={settings.thoughts} thinkingDisplay={settings.thinkingDisplay ?? 'expandido'}
-                thoughtsCollapsed={thoughtsCollapsed} perMessageCollapsed={perMessageCollapsed} copiedMessageId={copiedMessageId}
-                isStreaming={isStreaming} liveThought={liveThought} liveText={liveText}
-                nextStreamingReplyNumber={modelTurnCounter + 1} liveSubagents={liveSubagents}
-              />
-            </Box>
+      <Box flexDirection="row" flexGrow={1} flexShrink={1} overflow="hidden">
+        <Box ref={chatViewportRef} flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden" contentOffsetY={effectiveScrollTop}>
+          <Box ref={chatContentRef} flexDirection="column" flexShrink={0}>
+            <ChatHistoryView
+              numberedMessages={numberedMessages} uniformBoxWidth={uniformBoxWidth} uniformBoxInnerWidth={uniformBoxInnerWidth}
+              thoughtsEnabled={settings.thoughts} thinkingDisplay={settings.thinkingDisplay ?? 'expandido'}
+              thoughtsCollapsed={thoughtsCollapsed} perMessageCollapsed={perMessageCollapsed} copiedMessageId={copiedMessageId}
+              isStreaming={isStreaming} liveThought={liveThought} liveText={liveText}
+              nextStreamingReplyNumber={modelTurnCounter + 1} liveSubagents={liveSubagents}
+              usageCardNode={usageCardElement}
+            />
           </Box>
-          {scrollbarMetrics.hasOverflow && (
-            <Box flexDirection="column" width={1} flexShrink={0}>
-              {Array.from({ length: scrollbarMetrics.trackHeight }, (_, idx) => {
-                const inThumb = idx >= scrollbarMetrics.thumbTop && idx < scrollbarMetrics.thumbTop + scrollbarMetrics.thumbHeight;
-                return <Text key={idx} color={inThumb ? 'cyan' : 'gray'} dimColor={!inThumb}>{inThumb ? '┃' : '│'}</Text>;
-              })}
-            </Box>
-          )}
         </Box>
-      ) : <Box flexGrow={1} />}
+        {scrollbarMetrics.hasOverflow && (
+          <Box flexDirection="column" width={1} flexShrink={0}>
+            {Array.from({ length: scrollbarMetrics.trackHeight }, (_, idx) => {
+              const inThumb = idx >= scrollbarMetrics.thumbTop && idx < scrollbarMetrics.thumbTop + scrollbarMetrics.thumbHeight;
+              return <Text key={idx} color={inThumb ? 'cyan' : 'gray'} dimColor={!inThumb}>{inThumb ? '┃' : '│'}</Text>;
+            })}
+          </Box>
+        )}
+      </Box>
       {activeDialog === 'none' && showScrollBottomBtn && (
         <Box justifyContent="center" flexShrink={0}><Text color="cyan" bold>{`[${formatScrollToBottomLabel(newMsgsCount)}]`}</Text></Box>
       )}
