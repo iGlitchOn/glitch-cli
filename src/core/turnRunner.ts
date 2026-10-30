@@ -888,6 +888,10 @@ export async function runSingleTurn(
         parts: collectedParts,
       });
 
+      const hasVisibleToolCalls = functionCallParts.some(
+        (p) => p.functionCall?.name && p.functionCall.name !== 'cerrar_bloque',
+      );
+
       const hasInlineThoughtParts = collectedParts.some((p) => {
         const rec = p as Record<string, unknown>;
         const pType =
@@ -901,33 +905,41 @@ export async function runSingleTurn(
         );
       });
 
-      if (!hasInlineThoughtParts && (accThought.trim() || accText.trim())) {
-        options.onStepMessage?.({
-          text: accText.trim(),
-          thoughtText: accThought.trim() || undefined,
-          durationText: elapsed,
-          isFinal: false,
-        });
+      if (!hasInlineThoughtParts) {
+        const stepVisibleText = hasVisibleToolCalls ? '' : accText.trim();
+        const stepThought = accThought.trim() || undefined;
+        if (stepThought || stepVisibleText) {
+          options.onStepMessage?.({
+            text: stepVisibleText,
+            thoughtText: stepThought,
+            durationText: elapsed,
+            isFinal: false,
+          });
+        }
       }
 
       let pendingInlineThought = '';
       let pendingInlineText = '';
 
-      const flushPendingThoughtAndText = () => {
-        if (!pendingInlineThought.trim() && !pendingInlineText.trim()) {
-          return;
+      const flushPendingThoughtAndText = (suppressTextForTool = false) => {
+        const textToEmit = suppressTextForTool ? '' : pendingInlineText.trim();
+        const thoughtToEmit = pendingInlineThought.trim() || undefined;
+        if (thoughtToEmit || textToEmit) {
+          options.onStepMessage?.({
+            text: textToEmit,
+            thoughtText: thoughtToEmit,
+            durationText: elapsed,
+            isFinal: false,
+          });
         }
-        options.onStepMessage?.({
-          text: pendingInlineText.trim(),
-          thoughtText: pendingInlineThought.trim() || undefined,
-          durationText: elapsed,
-          isFinal: false,
-        });
         pendingInlineThought = '';
-        pendingInlineText = '';
+        if (!suppressTextForTool) {
+          pendingInlineText = '';
+        }
       };
 
       const stepSubthinking = accText.trim() || undefined;
+      let unconsumedStepSubthinking = stepSubthinking;
       if (stepSubthinking) {
         recordBlockSubthinking(blockAcc, stepSubthinking);
       }
@@ -960,10 +972,8 @@ export async function runSingleTurn(
         }
 
         if (!part.functionCall?.name && part.text) {
-          if (hasInlineThoughtParts) {
-            pendingInlineText += part.text;
-            recordBlockSubthinking(blockAcc, part.text);
-          }
+          pendingInlineText += part.text;
+          recordBlockSubthinking(blockAcc, part.text);
           continue;
         }
 
@@ -971,14 +981,21 @@ export async function runSingleTurn(
           continue;
         }
 
-        const inlineSub = pendingInlineText.trim() || stepSubthinking;
-        flushPendingThoughtAndText();
-
         const fc = part.functionCall!;
         const name = fc.name ?? '';
         if (name === 'cerrar_bloque') {
           continue;
         }
+
+        if (hasInlineThoughtParts && pendingInlineThought.trim()) {
+          flushPendingThoughtAndText(true);
+        }
+
+        const inlineSub =
+          pendingInlineText.trim() || unconsumedStepSubthinking;
+        pendingInlineText = '';
+        unconsumedStepSubthinking = undefined;
+
         const args = (fc.args ?? {}) as Record<string, unknown>;
         const summary = formatToolActionSummary(name, args);
         options.onToolStart?.({
@@ -990,7 +1007,11 @@ export async function runSingleTurn(
         });
       }
 
-      flushPendingThoughtAndText();
+      if (hasInlineThoughtParts) {
+        flushPendingThoughtAndText(hasVisibleToolCalls);
+      } else if (!hasVisibleToolCalls && pendingInlineText.trim()) {
+        pendingInlineText = '';
+      }
 
       let closedBlockInThisRound = false;
 

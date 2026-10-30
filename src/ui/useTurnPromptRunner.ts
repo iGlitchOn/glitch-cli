@@ -226,6 +226,8 @@ export function createTurnPromptActions(deps: TurnPromptRunnerDeps): {
           }
         },
         onStepMessage: (step) => {
+          deps.setLiveThought('');
+          deps.setLiveText('');
           deps.setLastTurnDurationText(step.durationText);
           const stepMsg: SavedUiMessage = {
             id: `${Date.now()}-${Math.random()}-${step.isFinal ? 'm' : 'm-step'}`,
@@ -242,6 +244,8 @@ export function createTurnPromptActions(deps: TurnPromptRunnerDeps): {
           });
         },
         onToolStart: (ev) => {
+          deps.setLiveThought('');
+          deps.setLiveText('');
           const callKey = ev.id || `${ev.name}-${Date.now()}-${Math.random()}`;
           const lineText = formatCompactToolCallLine({
             name: ev.name,

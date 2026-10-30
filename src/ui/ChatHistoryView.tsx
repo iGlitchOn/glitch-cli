@@ -166,6 +166,43 @@ export const ChatHistoryView: React.FC<ChatHistoryViewProps> = React.memo(({
     );
   };
 
+  const renderSubthinkingBlock = (subthinkingContent: string | undefined) => {
+    if (!subthinkingContent || !subthinkingContent.trim()) {
+      return null;
+    }
+    const rawParas = subthinkingContent
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    const wrappedTokenLines: InlineToken[][] = [];
+    for (const para of rawParas) {
+      const tokens = parseInlineMarkdownTokens(para);
+      const lines = wrapInlineTokensByWords(
+        tokens,
+        Math.max(10, uniformBoxInnerWidth),
+      );
+      for (const ln of lines) {
+        if (ln.length > 0) wrappedTokenLines.push(ln);
+      }
+    }
+    if (wrappedTokenLines.length === 0) {
+      return null;
+    }
+    return (
+      <Box
+        flexDirection="column"
+        width={uniformBoxWidth}
+        marginLeft={0}
+        paddingX={1}
+        marginTop={0}
+        marginBottom={0}
+      >
+        {wrappedTokenLines.map((toks, idx) => renderThoughtTokensLine(toks, idx))}
+      </Box>
+    );
+  };
+
   const renderUserMessageBlock = (
     m: NumberedUiMessage,
   ) => {
@@ -199,7 +236,7 @@ export const ChatHistoryView: React.FC<ChatHistoryViewProps> = React.memo(({
         const topMargin = m.role === 'user' && msgIndex === 0 ? 1 : 0;
         const hasModelText = m.text.trim().length > 0;
         const hasThoughtText = Boolean(
-          m.thoughtText && m.thoughtText.trim().length > 0,
+          thoughtsEnabled && m.thoughtText && m.thoughtText.trim().length > 0,
         );
 
         if (m.isBlockSummary) {
@@ -223,6 +260,25 @@ export const ChatHistoryView: React.FC<ChatHistoryViewProps> = React.memo(({
           return null;
         }
 
+        const nextMsg = numberedMessages[msgIndex + 1];
+        const isGroupedWithNextTool =
+          m.role === 'system' &&
+          Boolean(m.toolStatus) &&
+          nextMsg?.role === 'system' &&
+          Boolean(nextMsg.toolStatus) &&
+          !nextMsg.subthinking;
+
+        const prevMsg = msgIndex > 0 ? numberedMessages[msgIndex - 1] : undefined;
+        const isDuplicateSubthinking =
+          Boolean(m.subthinking) &&
+          Boolean(
+            prevMsg &&
+              (prevMsg.subthinking?.trim() === m.subthinking?.trim() ||
+                prevMsg.text.trim() === m.subthinking?.trim() ||
+                (thoughtsEnabled &&
+                  prevMsg.thoughtText?.trim() === m.subthinking?.trim())),
+          );
+
         const isMsgThoughtCollapsed = shouldCollapseThought(
           thinkingDisplay,
           true,
@@ -240,7 +296,7 @@ export const ChatHistoryView: React.FC<ChatHistoryViewProps> = React.memo(({
             key={m.id}
             flexDirection="column"
             marginTop={topMargin}
-            marginBottom={1}
+            marginBottom={isGroupedWithNextTool ? 0 : 1}
           >
             {m.role === 'user' && renderUserMessageBlock(m)}
             {m.role === 'model' && (
@@ -270,13 +326,7 @@ export const ChatHistoryView: React.FC<ChatHistoryViewProps> = React.memo(({
             )}
             {m.role === 'system' && (
               <Box flexDirection="column">
-                {m.subthinking && (
-                  <Box paddingX={1}>
-                    <Text color="gray" dimColor>
-                      {m.subthinking}
-                    </Text>
-                  </Box>
-                )}
+                {!isDuplicateSubthinking && renderSubthinkingBlock(m.subthinking)}
                 <ToolCallView
                   rawText={m.text}
                   uniformBoxWidth={uniformBoxWidth}

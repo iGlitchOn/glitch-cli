@@ -1851,4 +1851,73 @@ describe('Etapa 5: Loop unificado en turnRunner.ts', () => {
       'Creación de app con HTML',
     );
   });
+
+  it('evita duplicar subthinking entre onStepMessage y múltiples herramientas paralelas del mismo paso', async () => {
+    const session = new SessionState({
+      ...DEFAULT_SETTINGS,
+      permissionMode: 'always_allow',
+      subMode: 'agent',
+    });
+
+    let step = 0;
+    const adapter: ProviderAdapter = {
+      id: 'vertex',
+      async *streamTurn(): AsyncGenerator<ProviderStreamChunk, void, unknown> {
+        step++;
+        if (step === 1) {
+          const subText =
+            'Quiero revisar `.gitignore` y `package.json` al mismo tiempo.';
+          yield {
+            text: subText,
+            rawParts: [
+              { text: subText },
+              {
+                functionCall: {
+                  id: 'fc-par-1',
+                  name: 'list_directory',
+                  args: { dir_path: tempHome },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'fc-par-2',
+                  name: 'list_directory',
+                  args: { dir_path: tempHome },
+                },
+              },
+            ],
+          };
+          return;
+        }
+        yield {
+          text: 'Revisión completada.',
+          rawParts: [{ text: 'Revisión completada.' }],
+        };
+      },
+    };
+
+    const stepMessages: TurnStepMessageEvent[] = [];
+    const toolStarts: TurnToolStartEvent[] = [];
+
+    await runSingleTurn({
+      session,
+      userPrompt: 'Revisa los archivos sin duplicar pensamientos',
+      getAdapter: () => adapter,
+      customHomeDir: tempHome,
+      onStepMessage: (m) => stepMessages.push(m),
+      onToolStart: (ev) => toolStarts.push(ev),
+    });
+
+    // En el paso 1 con herramientas visibles, no debe emitirse un stepMessage con el texto de subthinking duplicado
+    expect(stepMessages).toHaveLength(1);
+    expect(stepMessages[0]?.text).toBe('Revisión completada.');
+    expect(stepMessages[0]?.isFinal).toBe(true);
+
+    // En el lote paralelo de 2 herramientas, solo la primera lleva subthinking y la segunda no lo repite
+    expect(toolStarts).toHaveLength(2);
+    expect(toolStarts[0]?.subthinking).toBe(
+      'Quiero revisar `.gitignore` y `package.json` al mismo tiempo.',
+    );
+    expect(toolStarts[1]?.subthinking).toBeUndefined();
+  });
 });
