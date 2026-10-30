@@ -88,6 +88,7 @@ export interface TurnPromptRunnerDeps {
 export function createTurnPromptActions(deps: TurnPromptRunnerDeps): {
   startOrEnqueuePrompt: (userPrompt: string) => void;
   cancelCurrentTurnAndQueue: () => void;
+  injectBtwNote: (noteText: string) => void;
   submitSubagentCorrection: (
     sub: LiveSubagentInfo,
     correctionText: string,
@@ -96,7 +97,9 @@ export function createTurnPromptActions(deps: TurnPromptRunnerDeps): {
 } {
   const stepControllerRef: TurnStepControllerRef = {
     interruptCurrentStepForCorrection: () => {},
+    injectBtwThoughtNote: () => {},
   };
+  const pendingIdleBtwNotes: string[] = [];
   const buildAdapter = (): ProviderAdapter => {
     const cur = deps.sessionRef.current.settings;
     const retryOpts = { maxRetries: 9, baseDelayMs: 600 };
@@ -194,10 +197,14 @@ export function createTurnPromptActions(deps: TurnPromptRunnerDeps): {
     });
 
     let lastStreamUiFlushTs = 0;
+    const effectiveUserPrompt =
+      pendingIdleBtwNotes.length > 0
+        ? `${userPrompt}\n\n[Notas /btw en cadena de pensamiento]:\n${pendingIdleBtwNotes.splice(0).map((n) => `- ${n}`).join('\n')}`
+        : userPrompt;
     try {
       const turnRes = await runSingleTurn({
         session,
-        userPrompt,
+        userPrompt: effectiveUserPrompt,
         getAdapter: buildAdapter,
         abortSignal: abortController.signal,
         stepControllerRef,
@@ -478,9 +485,22 @@ export function createTurnPromptActions(deps: TurnPromptRunnerDeps): {
     return { status: 'sent_live' };
   };
 
+  const injectBtwNote = (noteText: string) => {
+    const clean = noteText.trim();
+    if (!clean) return;
+    if (deps.sessionRef.current.isRequestActive) {
+      stepControllerRef.injectBtwThoughtNote?.(clean);
+      deps.addSystemMessage(`[btw -> pensamiento en vivo] ${clean}`);
+    } else {
+      pendingIdleBtwNotes.push(clean);
+      deps.addSystemMessage(`[btw -> cadena de pensamiento] ${clean}`);
+    }
+  };
+
   return {
     startOrEnqueuePrompt,
     cancelCurrentTurnAndQueue,
+    injectBtwNote,
     submitSubagentCorrection,
   };
 }

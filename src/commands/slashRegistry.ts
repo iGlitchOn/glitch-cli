@@ -42,6 +42,12 @@ export const SLASH_COMMANDS: readonly SlashCommandEntry[] = [
     desc: 'Ver o cambiar nivel de esfuerzo en vivo (low | medium | high)',
   },
   {
+    cmd: '/btw',
+    displayCmd: '/btw',
+    aliases: ['btw', 'nota', 'note', 'aside'],
+    desc: 'Agregar un dato o instrucción a la cadena de pensamiento en vivo sin frenar al agente',
+  },
+  {
     cmd: '/usage',
     displayCmd: '/usage',
     aliases: ['usage', 'uso', 'context', 'contexto', 'tokens', 'stats', 'cost'],
@@ -204,6 +210,7 @@ export function printHelpMenu(
   out('  /resume [num|id]          Retomar una conversación anterior guardada');
   out('  /model [id] [effort]      Seleccionar modelo y esfuerzo (ej. /model gemini-4-argon high)');
   out('  /effort [low|medium|high] Ver o cambiar el nivel de esfuerzo del modelo actual en vivo');
+  out('  /btw <dato>               Agregar un dato a la cadena de pensamiento en vivo sin frenar al agente');
   out('  /usage                    Auditar de dónde salen el % de contexto, tokens, MCPs, skills y costos');
   out('  /skills | /skill [subcmd] Ver skills reales, de dónde vienen y ~tokens aprox. (list | use | info | off | clear)');
   out('  /mcp                      Ver servidores MCP detectados, archivo de origen, comando y herramientas');

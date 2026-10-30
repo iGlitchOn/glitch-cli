@@ -364,7 +364,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
   };
   usePaste((pastedText) => handlePastedTextBlock(pastedText));
   const matchingSlash = activeDialog === 'none' && confirmDeleteQueueIdx === null ? matchSlashCommands(inputText) : [];
-  const { startOrEnqueuePrompt, cancelCurrentTurnAndQueue, submitSubagentCorrection } = createTurnPromptActions({
+  const { startOrEnqueuePrompt, cancelCurrentTurnAndQueue, injectBtwNote, submitSubagentCorrection } = createTurnPromptActions({
     sessionRef, streamStartTimeRef, abortControllerRef, messagesRef,
     activeSkillContentsRef, compactionTrackerRef, askUserUndoManagerRef, queueRef,
     installedSkills, mcpServers, setStreamingElapsedMs, setIsStreaming,
@@ -425,7 +425,7 @@ export const TuiApp: React.FC<TuiAppProps> = ({
       availableModels, modelPages, installedSkills,
       activeSkillContents: activeSkillContentsRef.current,
       lastTurnCostUsd, sessionCostUsd, persistCurrentSession, exit,
-      setShowShortcutsPanel, addSystemMessage, addUsageMessage, resetNewSessionUi,
+      setShowShortcutsPanel, addSystemMessage, addUsageMessage, injectBtwNote, resetNewSessionUi,
       resumeSavedSessionUi, setSavedSessionsList, setDialogCursor,
       setActiveDialog, setAuthStep, setAuthChoiceIdx, setAuthBuffer,
       setSettings, setEditingThresholdMode, setThresholdError,

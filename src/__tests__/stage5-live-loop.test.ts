@@ -1920,4 +1920,79 @@ describe('Etapa 5: Loop unificado en turnRunner.ts', () => {
     );
     expect(toolStarts[1]?.subthinking).toBeUndefined();
   });
+
+  it('inyecta nota con /btw (injectBtwThoughtNote) en la cadena de pensamiento en vivo sin abortar ni frenar el paso actual', async () => {
+    const session = new SessionState({
+      ...DEFAULT_SETTINGS,
+      permissionMode: 'always_allow',
+      subMode: 'agent',
+    });
+    const stepControllerRef: TurnStepControllerRef = {
+      interruptCurrentStepForCorrection: () => {},
+    };
+
+    let step = 0;
+    let step1WasAborted = false;
+    let step2SawBtwInHistory = false;
+    let step2SawBtwInSystemInstruction = false;
+
+    const adapter: ProviderAdapter = {
+      id: 'vertex',
+      async *streamTurn(
+        history: readonly Content[],
+        options: ProviderRequestOptions,
+      ): AsyncGenerator<ProviderStreamChunk, void, unknown> {
+        step++;
+        if (step === 1) {
+          yield { thoughtText: 'Analizando archivos del proyecto...' };
+          // El usuario lanza /btw a mitad del thinking del paso 1
+          stepControllerRef.injectBtwThoughtNote?.(
+            'pero recuerda que no debes tocar .git',
+          );
+          step1WasAborted = Boolean(options.abortSignal?.aborted);
+          yield {
+            text: 'Quiero listar el directorio.',
+            rawParts: [
+              { text: 'Quiero listar el directorio.' },
+              {
+                functionCall: {
+                  id: 'fc-btw-1',
+                  name: 'list_directory',
+                  args: { dir_path: tempHome },
+                },
+              },
+            ],
+          };
+          return;
+        }
+
+        const serializedHistory = JSON.stringify(history);
+        step2SawBtwInHistory = serializedHistory.includes(
+          'pero recuerda que no debes tocar .git',
+        );
+        step2SawBtwInSystemInstruction = Boolean(
+          options.systemInstruction?.includes(
+            'pero recuerda que no debes tocar .git',
+          ),
+        );
+        yield {
+          text: 'Entendido, completado sin tocar .git.',
+          rawParts: [{ text: 'Entendido, completado sin tocar .git.' }],
+        };
+      },
+    };
+
+    const res = await runSingleTurn({
+      session,
+      userPrompt: 'Limpia el proyecto',
+      getAdapter: () => adapter,
+      stepControllerRef,
+      customHomeDir: tempHome,
+    });
+
+    expect(step1WasAborted).toBe(false);
+    expect(step2SawBtwInHistory).toBe(true);
+    expect(step2SawBtwInSystemInstruction).toBe(true);
+    expect(res.finalText).toBe('Entendido, completado sin tocar .git.');
+  });
 });

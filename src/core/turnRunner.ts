@@ -38,6 +38,7 @@ import {
   drainCompletedUnconsumedSubagents,
   formatSubagentOutcomeForModel,
   nextSubagentRound,
+  sendSubagentCorrection,
   startSubagentInBackground,
   waitForSubagents,
   type BackgroundSubagentHandle,
@@ -130,6 +131,7 @@ export interface TurnRunnerCallbacks {
 
 export interface TurnStepControllerRef {
   interruptCurrentStepForCorrection: (priorityUserMessage?: string) => void;
+  injectBtwThoughtNote?: (noteText: string) => void;
 }
 
 export interface TurnRunnerOptions extends TurnRunnerCallbacks {
@@ -326,6 +328,8 @@ export async function runSingleTurn(
 
   const turnSubagentHandles: BackgroundSubagentHandle[] = [];
   const pendingPriorityMessages: string[] = [];
+  const pendingBtwNotes: string[] = [];
+  const activeBtwNotes: string[] = [];
   let currentStepAbortController = new AbortController();
   const blockAcc = createThinkingBlockAccumulator();
 
@@ -337,6 +341,18 @@ export async function runSingleTurn(
         pendingPriorityMessages.push(priorityMsg.trim());
       }
       currentStepAbortController.abort();
+    };
+    options.stepControllerRef.injectBtwThoughtNote = (noteText: string) => {
+      const clean = noteText.trim();
+      if (!clean) return;
+      pendingBtwNotes.push(clean);
+      activeBtwNotes.push(clean);
+      recordBlockSubthinking(blockAcc, `[BTW]: ${clean}`);
+      for (const h of turnSubagentHandles) {
+        if (h.info.status === 'running') {
+          sendSubagentCorrection(h.id, `[BTW del usuario]: ${clean}`);
+        }
+      }
     };
   }
 
@@ -545,6 +561,16 @@ export async function runSingleTurn(
         const prioText = pendingPriorityMessages.splice(0).join(os.EOL);
         injectUserTextIntoHistory(session.history, prioText);
       }
+      if (pendingBtwNotes.length > 0) {
+        const btwText = pendingBtwNotes
+          .splice(0)
+          .map(
+            (n) =>
+              `[Dato /btw agregado por el usuario a tu cadena de pensamiento en vivo (intégralo sin detener tu tarea)]: ${n}`,
+          )
+          .join(os.EOL);
+        injectUserTextIntoHistory(session.history, btwText);
+      }
 
       const activeAdapter = getAdapter();
       const preTurnLive = session.getLiveCallConfig((warnMsg) => {
@@ -629,6 +655,16 @@ export async function runSingleTurn(
           options.onSettingsReconciled?.();
         });
         const currentSkillContents = Array.from(activeSkillContents.values());
+        const baseSys = buildGlitchSystemInstruction(
+          currentLive.subMode,
+          currentSkillContents,
+          installedSkills,
+          currentLive.allowAgentQuestions,
+        );
+        const btwSuffix =
+          activeBtwNotes.length > 0
+            ? `${os.EOL}Notas /btw agregadas en vivo a tu cadena de pensamiento (respétalas estrictamente):${os.EOL}${activeBtwNotes.map((n) => `- ${n}`).join(os.EOL)}`
+            : '';
         return {
           model: currentLive.model,
           effort: currentLive.effort,
@@ -637,12 +673,7 @@ export async function runSingleTurn(
           permissionMode: currentLive.permissionMode,
           abortSignal: stepSignal,
           enableTools: true,
-          systemInstruction: buildGlitchSystemInstruction(
-            currentLive.subMode,
-            currentSkillContents,
-            installedSkills,
-            currentLive.allowAgentQuestions,
-          ),
+          systemInstruction: `${baseSys}${btwSuffix}`,
           getLiveOptions: buildLiveRequestOptions,
         };
       };
@@ -838,6 +869,18 @@ export async function runSingleTurn(
               session.history,
               `[Resultados de subagentes finalizados]${os.EOL}${formattedAll}`,
             );
+          }
+          continue;
+        }
+
+        if (pendingBtwNotes.length > 0 && !abortSignal?.aborted) {
+          if (finalAccText.trim() || finalAccThought.trim()) {
+            options.onStepMessage?.({
+              text: finalAccText,
+              thoughtText: finalAccThought || undefined,
+              durationText: elapsed,
+              isFinal: false,
+            });
           }
           continue;
         }

@@ -53,6 +53,7 @@ export interface CommandDispatchContext {
   setShowShortcutsPanel: React.Dispatch<React.SetStateAction<boolean>>;
   addSystemMessage: (text: string) => void;
   addUsageMessage?: () => void;
+  injectBtwNote?: (note: string) => void;
   resetNewSessionUi: (nextId: string) => void;
   resumeSavedSessionUi: (found: SavedSession, prefixText?: string) => void;
   setSavedSessionsList: (list: SavedSession[]) => void;
@@ -278,6 +279,21 @@ export function executeTuiInputCommand(
     ctx.syncActiveSkillsFromSet(res.updatedActiveSkills);
     if (logs.length > 0) {
       ctx.addSystemMessage(logs.join(os.EOL));
+    }
+    return;
+  }
+  if (resolved === '/btw' || resolved.startsWith('/btw ')) {
+    const note = resolved.slice('/btw'.length).trim();
+    if (!note) {
+      ctx.addSystemMessage(
+        'Uso: /btw <dato o instrucción> (ej. /btw pero recuerda que no debes tocar .git)',
+      );
+      return;
+    }
+    if (ctx.injectBtwNote) {
+      ctx.injectBtwNote(note);
+    } else {
+      ctx.addSystemMessage(`[btw -> pensamiento] ${note}`);
     }
     return;
   }
